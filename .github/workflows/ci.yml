@@ -47,8 +47,9 @@ jobs:
         uses: astral-sh/setup-uv@v10.0.1
         with:
           # shortcut: 钉住 3.14 —— 不钉的话 uv 会浮动到最新 CPython（2026-10-10 的 3.15），
-          # 而 onnxruntime 1.30.0 只有 cp313/cp314 wheel，uv sync --locked 直接装不上（issue #87）。
-          # 上游发出 cp315 wheel 后把这里抬到 3.15，或改成仓库级 .python-version。
+          # 而 onnxruntime 1.30.0 只有 cp313 / cp314 的 wheel，uv sync --locked 直接装不上（issue #87）。
+          # 本仓 .python-version 被 .gitignore 忽略（第 84 行），所以只能在 workflow 里钉；
+          # 上游发出 cp315 wheel 后把这里抬到 3.15。
           python-version: "3.14"
 
       - name: 安装依赖
