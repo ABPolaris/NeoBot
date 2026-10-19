@@ -1681,11 +1681,95 @@ class WebSearchConfig:
 
 
 @dataclass
+class Bilibili:
+    """B 站功能配置（默认开启；未登录等同关闭）。"""
+
+    enabled: bool = field(
+        default=True,
+        metadata={"description": "B站功能总开关；未登录时自动休眠，等同于关闭"},
+    )
+    poll_interval_seconds: int = field(
+        default=1800,
+        metadata={"description": "评论/私信轮询间隔（秒），默认 1800（30 分钟）"},
+    )
+    comment_reply_enabled: bool = field(
+        default=False,
+        metadata={"description": "是否自动回复B站评论/@（默认关闭，避免不可控的回复与 API 费用）"},
+    )
+    private_message_enabled: bool = field(
+        default=False,
+        metadata={"description": "是否自动回复B站私信（默认关闭）"},
+    )
+    login_timeout_seconds: int = field(
+        default=180,
+        metadata={"description": "二维码登录等待超时（秒）"},
+    )
+    max_replies_per_poll: int = field(
+        default=3,
+        metadata={"description": "每轮最多回复多少条，防止失控"},
+    )
+    reply_cooldown_seconds: float = field(
+        default=60.0,
+        metadata={"description": "同一会话两次回复之间的最小间隔（秒）"},
+    )
+    dynamic_diary_enabled: bool = field(
+        default=False,
+        metadata={"description": "是否启用 B 站动态日记（每日摘要并发布，默认关闭）"},
+    )
+    dynamic_diary_time: str = field(
+        default="22:30",
+        metadata={"description": "每日动态日记生成时间 HH:MM"},
+    )
+    cookie_file: str = field(
+        default="data/bilibili/cookies.json",
+        metadata={"description": "B站登录 cookie 保存路径（相对数据目录）"},
+    )
+
+
+@dataclass
+class ASR:
+    """语音识别配置（硅基流动 OpenAI 兼容接口）。"""
+
+    enabled: bool = field(
+        default=True,
+        metadata={"description": "是否启用外部 ASR（默认开启；实际调用受各功能开关控制）"},
+    )
+    provider: str = field(
+        default="siliconflow",
+        metadata={"description": "ASR 供应商：siliconflow / openai_compatible"},
+    )
+    model: str = field(
+        default="XingChenAGI/XingChenASR-V3.2-Ultra",
+        metadata={"description": "ASR 模型 ID（硅基流动免费模型）"},
+    )
+    base_url: str = field(
+        default="",
+        metadata={"description": "API Base URL；留空使用 env 的 SiliconFlow_URL"},
+    )
+    api_key: str = field(
+        default="",
+        metadata={"description": "API Key；留空使用 env 的 SiliconFlow_APIKey"},
+    )
+    language: str = field(
+        default="zh",
+        metadata={"description": "识别语言提示"},
+    )
+    timeout_seconds: int = field(
+        default=120,
+        metadata={"description": "单次转写超时（秒）"},
+    )
+    max_audio_mb: int = field(
+        default=50,
+        metadata={"description": "上传音频大小上限（MB，供应商限制 50MB/1 小时）"},
+    )
+
+
+@dataclass
 class BotConfig:
     """机器人主配置。"""
 
     version: str = field(
-        default="0.7.0",
+        default="0.8.0",
         metadata={"description": "配置文件版本（由程序维护，请勿手动修改）", "readonly": True},
     )
     bot: Bot = field(default_factory=Bot)
@@ -1705,6 +1789,8 @@ class BotConfig:
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     billing: Billing = field(default_factory=Billing)
     avatars: AvatarsConfig = field(default_factory=AvatarsConfig)
+    bilibili: Bilibili = field(default_factory=Bilibili)
+    asr: ASR = field(default_factory=ASR)
 
 
 @dataclass

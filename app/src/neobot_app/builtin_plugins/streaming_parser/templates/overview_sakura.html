@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=720">
+{{font_style}}
+<style>
+  /* ===== 樱花粉风格 · 开播状态总览图（原创，纯 CSS 绘制） ===== */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; width: 720px; background-color: #fff6fa; }
+  body {
+    font-family: "FusionPixel", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .card {
+    position: relative; width: 720px; overflow: hidden;
+    padding: 26px 26px 24px;
+    background-color: #fff6fa;
+    background-image:
+      radial-gradient(720px 420px at 92% -14%, #ffe1ed 0%, rgba(255, 225, 237, 0) 64%),
+      radial-gradient(560px 360px at -8% 108%, #ffe9f2 0%, rgba(255, 233, 242, 0) 62%),
+      linear-gradient(180deg, #fffdfe 0%, #fff6fa 100%);
+  }
+  .petal { position: absolute; border-radius: 0 100% 0 100%; pointer-events: none; }
+  .petal-1 { width: 130px; height: 130px; top: -38px; right: -30px; transform: rotate(-22deg);
+             background: linear-gradient(150deg, #ffcfe0, #fff1f6); opacity: .72; }
+  .petal-2 { width: 116px; height: 116px; bottom: -42px; left: -34px; transform: rotate(-6deg);
+             background: linear-gradient(150deg, #ffd4e3, #fff2f7); opacity: .68; }
+  .petal-3 { width: 56px; height: 56px; bottom: 84px; left: -24px; transform: rotate(38deg);
+             background: linear-gradient(150deg, #ffe0eb, #fff6fa); opacity: .55; }
+
+  .inner {
+    position: relative; background: #ffffff;
+    border: 1px solid rgba(251, 114, 153, .13);
+    border-radius: 26px; padding: 22px 22px 20px;
+    box-shadow: 0 20px 44px rgba(251, 114, 153, .16), 0 2px 6px rgba(251, 114, 153, .07);
+  }
+
+  /* 头部 */
+  .head {
+    display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
+    padding-bottom: 16px; margin-bottom: 18px;
+    border-bottom: 1px solid #f7e9ef;
+  }
+  .head-title {
+    font-size: 24px; line-height: 1.3; font-weight: 700; color: #2a2027;
+    letter-spacing: .01em;
+  }
+  .head-title::before {
+    content: ""; display: inline-block; vertical-align: 3px;
+    width: 8px; height: 8px; margin-right: 9px; border-radius: 50%;
+    background: linear-gradient(135deg, #fb7299, #ffa8c6);
+    box-shadow: 0 0 0 4px rgba(251, 114, 153, .14);
+  }
+  .head-summary { margin-top: 7px; font-size: 13px; color: #9b8d97; letter-spacing: .02em; }
+  .head-summary:empty { display: none; }
+  .head-mark { flex: 0 0 auto; display: inline-flex; align-items: flex-end; gap: 4px; height: 20px; }
+  .head-mark i { display: block; width: 4px; border-radius: 2px; background: #ffd0e0; }
+  .head-mark i:nth-child(1) { height: 8px; }
+  .head-mark i:nth-child(2) { height: 14px; }
+  .head-mark i:nth-child(3) { height: 20px; background: #fb7299; }
+
+  /* 网格：5 列 */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 22px 14px;
+  }
+
+  /* ===== 主播格子（由渲染端生成 grid 片段，类名契约固定） ===== */
+  .host {
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    min-width: 0; padding-top: 8px;
+  }
+  .host-avatar {
+    position: relative; display: inline-flex; flex: 0 0 auto;
+    width: 88px; height: 88px; border-radius: 50%;
+  }
+  .host-avatar img {
+    width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block;
+    background: linear-gradient(135deg, #ffd9e5, #fff0f6);
+    box-shadow: 0 4px 12px rgba(42, 32, 39, .10);
+  }
+  /* 开播中：B 站同款粉色圈圈（纯 CSS 圆环，主色 #FB7299） */
+  .host-live .host-avatar::before {
+    content: ""; position: absolute; top: -7px; left: -7px; right: -7px; bottom: -7px;
+    border-radius: 50%; border: 3px solid #fb7299;
+    box-shadow: 0 6px 16px rgba(251, 114, 153, .34);
+  }
+  .host:not(.host-live) .host-avatar { opacity: .62; }
+  .host:not(.host-live) .host-avatar img { box-shadow: none; }
+  /* LIVE 角标 */
+  .host-badge {
+    display: none; position: absolute; right: -9px; bottom: -1px;
+    align-items: center; padding: 2px 6px; border-radius: 7px;
+    font-size: 9px; font-weight: 700; letter-spacing: .08em; line-height: 1.5;
+    color: #ffffff; background: linear-gradient(135deg, #fb7299, #ff9bbc);
+    border: 2px solid #ffffff;
+    box-shadow: 0 3px 8px rgba(251, 114, 153, .42);
+  }
+  .host-live .host-badge { display: inline-flex; }
+  .host-live .host-avatar img { box-shadow: 0 0 0 3px #ffffff, 0 4px 12px rgba(251, 114, 153, .22); }
+  .host-name {
+    width: 100%; text-align: center;
+    font-size: 13px; line-height: 1.4; color: #6d6270;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .host-live .host-name { color: #e0507f; font-weight: 700; }
+
+</style>
+</head>
+<body>
+  <div class="card">
+    <span class="petal petal-1"></span>
+    <span class="petal petal-2"></span>
+    <span class="petal petal-3"></span>
+    <div class="inner">
+      <div class="head">
+        <div>
+          <div class="head-title">{{title_text}}</div>
+          <div class="head-summary">{{summary_text}}</div>
+        </div>
+        <span class="head-mark"><i></i><i></i><i></i></span>
+      </div>
+      <div class="grid">{{grid}}</div>
+    </div>
+  </div>
+</body>
+</html>

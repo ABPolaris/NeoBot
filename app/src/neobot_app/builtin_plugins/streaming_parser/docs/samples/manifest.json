@@ -1,0 +1,20 @@
+{
+  "uid": 392669996,
+  "name": "Icyの狼",
+  "room_id": 1914112138,
+  "live_status": 1,
+  "title": "【站长日记】ds炒鸡达摩你在哪啊",
+  "area_name": "AI应用·机器人",
+  "online": 2433,
+  "files": [
+    "card_sakura_live.png",
+    "card_sakura_live_end.png",
+    "card_neon_live.png",
+    "card_neon_live_end.png",
+    "card_minimal_live.png",
+    "card_minimal_live_end.png",
+    "overview_sakura.png",
+    "overview_neon.png",
+    "overview_minimal.png"
+  ]
+}

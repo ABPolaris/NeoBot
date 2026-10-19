@@ -118,7 +118,7 @@ class CrossChatSkill(SkillModule):
 
     @property
     def description(self) -> str:
-        return "跨聊天通信：把任务交给其他群/私聊的主 agent 处理，查询其他聊天的记录"
+        return "跨聊天通信：把任务交给其他群/私聊的主 agent 或 B站处理，查询其他聊天的记录"
 
     @property
     def instructions(self) -> str:
@@ -135,6 +135,12 @@ class CrossChatSkill(SkillModule):
             "## cross_chat_query\n"
             "查询指定聊天的聊天记录，了解其他聊天的讨论内容。\n"
             "任务示例：「获取群123456最近在聊什么」\n\n"
+            "## B站通道\n"
+            "target_kind=bilibili 时，target_id 用 B站会话ID：\n"
+            "  private:<UID> — B站私信\n"
+            "  comment:<oid>:<root>:<parent> — 视频评论区楼中楼（dynamic/opus/article 同理）\n"
+            "B站侧没有常驻 agent：通道会把任务改写成一句符合人设的B站发言再发出，"
+            "mode=wait 时把生成的发言放进 reply。\n\n"
             "注意：收到跨聊天回复回传时，应直接回复，不要再次委托本 skill。"
         )
 
@@ -146,6 +152,7 @@ class CrossChatSkill(SkillModule):
         friend_message_queue: Any = None,
         notification_hub: Any = None,
         orchestrator: Any = None,
+        bilibili_channel: Any = None,
         wait_timeout_seconds: float = DEFAULT_WAIT_TIMEOUT_SECONDS,
     ) -> None:
         self._config = config
@@ -154,6 +161,7 @@ class CrossChatSkill(SkillModule):
         self._friend_queue = friend_message_queue
         self._notification_hub = notification_hub
         self._orchestrator = orchestrator
+        self._bilibili_channel = bilibili_channel
         self._wait_timeout = float(wait_timeout_seconds)
         self._tasks: dict[str, _CrossChatTask] = {}
         self._watchers: set[asyncio.Task[None]] = set()
@@ -163,6 +171,10 @@ class CrossChatSkill(SkillModule):
 
     def set_notification_hub(self, hub: Any) -> None:
         self._notification_hub = hub
+
+    def set_bilibili_channel(self, channel: Any) -> None:
+        """注入 B站通道（bilibili.channel.BilibiliCrossChatChannel）。"""
+        self._bilibili_channel = channel
 
     def reset(self) -> None:
         # 只清任务档案：在途的结果回传不该因为开了新会话就被丢掉。
@@ -179,10 +191,14 @@ class CrossChatSkill(SkillModule):
                 {
                     "properties": {
                         "target_kind": {
-                            "type": "string", "enum": ["group", "private"],
-                            "description": "目标聊天类型：group=群聊，private=私聊",
+                            "type": "string", "enum": ["group", "private", "bilibili"],
+                            "description": "目标聊天类型：group=群聊，private=私聊，bilibili=B站通道",
                         },
-                        "target_id": {"type": "string", "description": "目标群号或QQ号"},
+                        "target_id": {
+                            "type": "string",
+                            "description": "目标群号/QQ号；B站通道为 private:<UID> 或 "
+                            "comment:<oid>:<root>:<parent>（dynamic/opus/article 前缀同理）",
+                        },
                         "task": {
                             "type": "string",
                             "description": "交给目标聊天主 agent 的任务内容，"
@@ -209,10 +225,14 @@ class CrossChatSkill(SkillModule):
                 {
                     "properties": {
                         "target_kind": {
-                            "type": "string", "enum": ["group", "private"],
-                            "description": "目标聊天类型",
+                            "type": "string", "enum": ["group", "private", "bilibili"],
+                            "description": "目标聊天类型：group=群聊，private=私聊，bilibili=B站通道",
                         },
-                        "target_id": {"type": "string", "description": "目标群号或QQ号"},
+                        "target_id": {
+                            "type": "string",
+                            "description": "目标群号/QQ号；B站通道为 private:<UID> 或 "
+                            "comment:<oid>:<root>:<parent>（dynamic/opus/article 前缀同理）",
+                        },
                         "query": {"type": "string", "description": "要查询的信息描述"},
                         "message_count": {"type": "integer", "description": "读取最近消息条数，默认 20", "default": 20},
                     },
@@ -307,6 +327,53 @@ class CrossChatSkill(SkillModule):
         error = str(getattr(event, "error", "") or "").strip()
         return True, "", error or "目标聊天本轮没有产出正文"
 
+    async def _send_bilibili(
+        self,
+        target_id: str,
+        content: str,
+        mode: str,
+        notification_mode: str,
+        origin: tuple[str, str] | None,
+        record: _CrossChatTask,
+    ) -> str:
+        """B站通道：由通道把任务改写成 B站发言并发送。
+
+        B站侧没有常驻主 agent，投递本身就是一次 LLM 生成，所以这里同步等待结果。
+        """
+        channel = self._bilibili_channel
+        if channel is None:
+            record.status = "failed"
+            record.detail = "B站通道未配置"
+            return _json({"ok": False, "error": record.detail, "task_id": record.task_id})
+        try:
+            delivered, reply, detail = await channel.send_task(target_id, content)
+        except Exception as exc:
+            delivered, reply = False, ""
+            detail = f"B站通道调用失败：{type(exc).__name__}: {exc}"
+        if not delivered:
+            record.status = "failed"
+            record.detail = detail
+            return _json({"ok": False, "error": detail, "task_id": record.task_id})
+        record.reply = reply
+        record.detail = detail
+        record.status = "responded" if reply else "delivered"
+        payload: dict[str, Any] = {
+            "ok": True,
+            "task_id": record.task_id,
+            "mode": mode,
+            "notification_mode": notification_mode,
+            "target": record.target,
+            "detail": detail,
+            "status": record.status,
+        }
+        if reply:
+            payload["reply"] = reply
+        if notification_mode == "response" and reply and origin is not None:
+            payload["relayed"] = await self._publish_to_origin(
+                origin, reply, record.task_id, detail
+            )
+        return _json(payload)
+
     async def _publish_to_origin(
         self, origin: tuple[str, str], reply: str, task_id: str, detail: str = "",
     ) -> bool:
@@ -350,8 +417,8 @@ async def _handle_cross_chat_send(self: CrossChatSkill, args: dict) -> str:
     raw_task = str(args.get("task") or "").strip()
     if not target_kind or not target_id or not raw_task:
         return _json({"ok": False, "error": "缺少必要参数 target_kind/target_id/task"})
-    if target_kind not in ("group", "private"):
-        return _json({"ok": False, "error": f"target_kind 必须是 group 或 private，收到 {target_kind!r}"})
+    if target_kind not in ("group", "private", "bilibili"):
+        return _json({"ok": False, "error": f"target_kind 必须是 group、private 或 bilibili，收到 {target_kind!r}"})
 
     task_text, markers = extract_leading_markers(raw_task)
     mode = _canonical_mode(args.get("mode") if args.get("mode") else markers.get("mode"))
@@ -375,6 +442,11 @@ async def _handle_cross_chat_send(self: CrossChatSkill, args: dict) -> str:
         status="pending",
     )
     self._remember(record)
+
+    if target_kind == "bilibili":
+        return await self._send_bilibili(
+            target_id, task_text, mode, notification_mode, origin, record
+        )
 
     delivered, event, detail = await self._deliver(
         target_kind, target_id, task_text, task_id, origin,
@@ -432,11 +504,22 @@ async def _handle_cross_chat_send(self: CrossChatSkill, args: dict) -> str:
 
 
 async def _handle_cross_chat_query(self: CrossChatSkill, args: dict) -> str:
-    if self._adapter is None:
-        return _json({"ok": False, "error": "adapter 未配置"})
     target_kind = str(args.get("target_kind", "")).strip()
     target_id = str(args.get("target_id", "")).strip()
     count = int(args.get("message_count", 20))
+    if target_kind == "bilibili":
+        channel = self._bilibili_channel
+        if channel is None:
+            return _json({"ok": False, "error": "B站通道未配置"})
+        try:
+            history = await channel.get_history(target_id, count=count)
+        except Exception as e:
+            return _json({"ok": False, "error": str(e)})
+        if not history:
+            return _json({"ok": True, "history": f"（B站 {target_id} 暂无可用记录）"})
+        return _json({"ok": True, "history": history})
+    if self._adapter is None:
+        return _json({"ok": False, "error": "adapter 未配置"})
     try:
         queue = self._friend_queue if target_kind == "private" else self._group_queue
         if queue is None:

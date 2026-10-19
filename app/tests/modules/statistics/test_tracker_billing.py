@@ -409,6 +409,22 @@ async def test_unknown_module_is_skipped(tmp_path, session_factory):
     assert await fetch_records(session_factory) == []
 
 
+async def test_bilibili_module_is_recorded(tmp_path, session_factory):
+    """B站回复调用是合法统计模块，落库后按模块可检索。"""
+    register_model("m-bili")
+    tracker = UsageTracker(session_factory, logger=RecordingLogger(), billing=make_billing())
+    await tracker.record(
+        module="bilibili",
+        model_name="deepseek-flash",
+        registered_key="m-bili",
+        input_tokens=0,
+        output_tokens=0,
+    )
+    records = await fetch_records(session_factory)
+    assert len(records) == 1
+    assert records[0].module_name == "bilibili"
+
+
 async def test_unknown_model_is_skipped(tmp_path, session_factory):
     """既有行为不变：注册表里找不到同名模型则静默跳过。"""
     model_registry.clear()

@@ -316,7 +316,9 @@ def test_assistant_messages_carry_no_render_prefix() -> None:
     assert "AAA大肥鱼" not in assistant[0]
     assert "[msg_id=" not in assistant[0]
     # user 侧仍是「[msg_id=...] 编号: 名字: 正文」
-    assert [m for m in user if m.startswith("[msg_id=")] == ["[msg_id=1] 1: 群友: 在吗"]
+    assert [m for m in user if m.startswith("[msg_id=")] == [
+        "[msg_id=1] 1: [刚刚] 群友: 在吗"
+    ]
 
 
 def test_assistant_quoted_reply_has_no_prefix() -> None:

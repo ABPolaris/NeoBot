@@ -1,0 +1,198 @@
+"""BilibiliPrivateMonitor 测试：默认关闭、跳过自己/旧消息、去重、合并多条、发送。"""
+
+from __future__ import annotations
+
+import json
+import time
+from types import SimpleNamespace
+
+from neobot_app.bilibili.private_monitor import BilibiliPrivateMonitor
+
+
+class FakeEngine:
+    def __init__(self, text: str | None = "在的") -> None:
+        self.text = text
+        self.available = True
+        self.contexts = []
+
+    async def generate_private_reply(self, ctx):
+        self.contexts.append(ctx)
+        return self.text
+
+
+class FakeClient:
+    my_uid = 999
+
+    def __init__(self, sessions=None, messages=None, *, fail_send: bool = False) -> None:
+        self.sessions = list(sessions or [])
+        self.messages = dict(messages or {})
+        self.fail_send = fail_send
+        self.sent: list[tuple[int, str]] = []
+
+    def get_sessions(self, count: int = 30):
+        return self.sessions
+
+    def get_messages(self, talker_id: int, size: int = 5):
+        return list(self.messages.get(talker_id, []))[-size:]
+
+    def send_message(self, receiver_id: int, text: str) -> bool:
+        if self.fail_send:
+            return False
+        self.sent.append((receiver_id, text))
+        return True
+
+
+def message(
+    sender_uid: int = 55,
+    text: str = "在吗",
+    *,
+    timestamp: int = 0,
+    msg_key: str = "",
+    msg_type: int = 1,
+) -> SimpleNamespace:
+    content = json.dumps({"content": text}, ensure_ascii=False) if msg_type == 1 else "{}"
+    return SimpleNamespace(
+        talker_id=sender_uid,
+        sender_uid=sender_uid,
+        msg_type=msg_type,
+        content=content,
+        timestamp=timestamp,
+        msg_key=msg_key or f"55_{timestamp}_{text[:20]}",
+        is_self=sender_uid == FakeClient.my_uid,
+    )
+
+
+def session(talker_id: int = 55) -> SimpleNamespace:
+    return SimpleNamespace(talker_id=talker_id, last_msg=None)
+
+
+def _monitor(client, engine=None, **kwargs) -> BilibiliPrivateMonitor:
+    values = {
+        "enabled": True,
+        "poll_interval_seconds": 1800,
+        "max_replies_per_poll": 3,
+        "reply_cooldown_seconds": 0,
+        "start_time": 0,
+    }
+    values.update(kwargs)
+    return BilibiliPrivateMonitor(client, engine or FakeEngine(), **values)
+
+
+async def test_disabled_monitor_does_not_poll() -> None:
+    client = FakeClient([session()], {55: [message()]})
+    engine = FakeEngine()
+    monitor = BilibiliPrivateMonitor(client, engine, enabled=False)
+
+    assert await monitor.poll_once() == 0
+    assert engine.contexts == []
+    await monitor.start()
+    assert monitor.is_running is False
+
+
+async def test_new_message_generates_and_sends() -> None:
+    client = FakeClient([session()], {55: [message(55, "在吗", timestamp=100)]})
+    engine = FakeEngine("在的")
+    monitor = _monitor(client, engine)
+
+    assert await monitor.poll_once() == 1
+    assert client.sent == [(55, "在的")]
+    ctx = engine.contexts[0]
+    assert ctx.current_message == "在吗"
+    assert ctx.sender_uid == 55
+    assert any(item["content"] == "在吗" for item in ctx.history)
+
+
+async def test_self_and_old_messages_are_skipped() -> None:
+    now = int(time.time())
+    client = FakeClient(
+        [session()],
+        {
+            55: [
+                message(FakeClient.my_uid, "我自己说的", timestamp=now),
+                message(55, "旧消息", timestamp=now - 1000),
+            ]
+        },
+    )
+    engine = FakeEngine()
+    monitor = _monitor(client, engine, start_time=now)
+
+    assert await monitor.poll_once() == 0
+    assert client.sent == []
+    assert engine.contexts == []
+
+
+async def test_duplicate_message_is_not_answered_twice() -> None:
+    client = FakeClient([session()], {55: [message(55, "在吗", timestamp=100)]})
+    monitor = _monitor(client)
+
+    assert await monitor.poll_once() == 1
+    assert await monitor.poll_once() == 0
+    assert len(client.sent) == 1
+
+
+async def test_multiple_messages_from_one_session_merge_into_one_reply() -> None:
+    client = FakeClient(
+        [session()],
+        {55: [message(55, "在吗", timestamp=100), message(55, "问你个事", timestamp=101)]},
+    )
+    engine = FakeEngine()
+    monitor = _monitor(client, engine)
+
+    assert await monitor.poll_once() == 1
+    assert len(client.sent) == 1
+    assert engine.contexts[0].current_message == "问你个事"
+    contents = [item["content"] for item in engine.contexts[0].history]
+    assert "在吗" in contents and "问你个事" in contents
+
+
+async def test_non_text_message_is_skipped() -> None:
+    client = FakeClient([session()], {55: [message(55, "", msg_type=2, timestamp=100)]})
+    monitor = _monitor(client)
+
+    assert await monitor.poll_once() == 0
+    assert client.sent == []
+
+
+async def test_skip_from_engine_marks_processed() -> None:
+    client = FakeClient([session()], {55: [message(55, "在吗", timestamp=100)]})
+    engine = FakeEngine(None)
+    monitor = _monitor(client, engine)
+
+    assert await monitor.poll_once() == 0
+    assert await monitor.poll_once() == 0
+    assert len(engine.contexts) == 1
+
+
+async def test_send_failure_increases_backoff() -> None:
+    client = FakeClient([session()], {55: [message(55, "在吗", timestamp=100)]}, fail_send=True)
+    monitor = _monitor(client)
+
+    assert await monitor.poll_once() == 0
+    assert monitor.next_poll_interval == 3600
+
+
+async def test_max_replies_per_poll() -> None:
+    client = FakeClient(
+        [session(55), session(66), session(77)],
+        {55: [message(55, "a", timestamp=100)], 66: [message(66, "b", timestamp=100)], 77: [message(77, "c", timestamp=100)]},
+    )
+    monitor = _monitor(client, max_replies_per_poll=2)
+
+    assert await monitor.poll_once() == 2
+    assert len(client.sent) == 2
+
+
+def test_default_poll_interval_is_1800() -> None:
+    assert BilibiliPrivateMonitor().next_poll_interval == 1800
+    assert BilibiliPrivateMonitor(poll_interval_seconds=0).next_poll_interval == 1800
+    cfg = SimpleNamespace(bilibili=SimpleNamespace())
+    assert BilibiliPrivateMonitor.from_config(None, None, cfg).next_poll_interval == 1800
+
+
+async def test_start_stop_lifecycle() -> None:
+    monitor = _monitor(FakeClient())
+
+    await monitor.start()
+    assert monitor.is_running is True
+    await monitor.stop()
+    assert monitor.is_running is False

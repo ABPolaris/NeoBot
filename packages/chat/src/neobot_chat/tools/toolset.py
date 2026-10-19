@@ -26,25 +26,36 @@ class ToolSpec:
         return self.definition["function"]["name"]
 
 
-class SelectedToolExecutor(ToolExecutor):
-    def __init__(self, executor: ToolExecutor, names: set[str]):
-        self._executor = executor
-        self._names = names
+class MergedToolExecutor(ToolExecutor):
+    """把多个 Toolset 组合成一个执行面。
+
+    契约是各 Toolset 的 definitions()（公开面），而不是 specs 快照：
+    LiveToolset 一类工具集会按需加载，合并后必须继续实时反映当前工具面。
+    重名工具后者优先，执行路由到当前定义它的 Toolset。
+    """
+
+    def __init__(self, toolsets: list["Toolset"]):
+        self._toolsets = list(toolsets)
+
+    def _surface(self) -> dict[str, tuple["Toolset", ToolDefinition]]:
+        surface: dict[str, tuple[Toolset, ToolDefinition]] = {}
+        for toolset in self._toolsets:
+            for definition in toolset.definitions():
+                surface[definition["function"]["name"]] = (toolset, definition)
+        return surface
 
     def definitions(self) -> list[ToolDefinition]:
-        return [
-            tool
-            for tool in self._executor.definitions()
-            if tool["function"]["name"] in self._names
-        ]
+        return [definition for _toolset, definition in self._surface().values()]
 
     async def execute(self, name: str, args: dict) -> str:
-        if name not in self._names:
+        entry = self._surface().get(name)
+        if entry is None:
             raise ToolError(f"Unknown tool: {name}")
-        return await self._executor.execute(name, args)
+        return await entry[0].executor.execute(name, args)
 
     async def close(self) -> None:
-        await self._executor.close()
+        for toolset in self._toolsets:
+            await toolset.executor.close()
 
 
 @dataclass(frozen=True)
@@ -58,10 +69,16 @@ class Toolset:
 
     @classmethod
     def merge(cls, toolsets: list[Toolset | None]) -> Toolset:
+        """合并工具集：以各自的 definitions() 为准，而不是 specs 快照。
+
+        动态工具集（如按需加载）的 specs 为空，但 definitions() 会随加载变化；
+        合并结果必须保留这份实时性，否则 Agent 拿到的是一个没有工具的空壳。
+        """
         active_toolsets = [toolset for toolset in toolsets if toolset is not None]
         if not active_toolsets:
             return cls(executor=CompositeToolExecutor([]), specs=[])
 
+        # specs 只用于访问策略（静态工具才有 resolver），不参与工具面判定。
         selected_specs: dict[str, tuple[ToolSpec, int]] = {}
         for index, toolset in enumerate(active_toolsets):
             for spec in toolset.specs:
@@ -78,15 +95,12 @@ class Toolset:
                 ordered_specs.append(spec)
         ordered_specs.reverse()
 
-        executors: list[ToolExecutor] = []
-        for index, toolset in enumerate(active_toolsets):
-            names = {
-                spec.name
-                for spec, owner_index in selected_specs.values()
-                if owner_index == index
-            }
-            if names:
-                executors.append(SelectedToolExecutor(toolset.executor, names))
+        merged_executor = MergedToolExecutor(active_toolsets)
+        return MergedToolset(executor=merged_executor, specs=ordered_specs)
 
-        merged_executor = CompositeToolExecutor(executors)
-        return cls(executor=merged_executor, specs=ordered_specs)
+
+class MergedToolset(Toolset):
+    """合并后的实时工具集：definitions() 每轮从合并执行器重算。"""
+
+    def definitions(self) -> list[ToolDefinition]:
+        return self.executor.definitions()

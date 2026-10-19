@@ -1,0 +1,23 @@
+{
+  "code": 0,
+  "message": "0",
+  "msg": "0",
+  "data": {
+    "room_id": 21452505,
+    "short_id": 5440,
+    "uid": 401742377,
+    "title": "测试直播间标题",
+    "live_status": 1,
+    "live_time": "2023-11-15 06:13:20",
+    "online": 12345,
+    "attention": 678900,
+    "area_id": 231,
+    "area_name": "虚拟主播",
+    "parent_area_id": 1,
+    "parent_area_name": "虚拟主播",
+    "description": "简介",
+    "user_cover": "https://example.invalid/user_cover.jpg",
+    "keyframe": "https://example.invalid/keyframe.jpg",
+    "tags": "标签1,标签2"
+  }
+}

@@ -25,6 +25,7 @@ from .config_manager import (
     describe_pydantic_model,
     models_view,
 )
+from .bilibili_login import LOGIN_PAGE, LOGIN_SCRIPT
 from .model_probe import list_provider_models
 from .plugin_config import (
     PluginConfigConflictError,
@@ -428,6 +429,51 @@ class DashboardApi:
         response = _json_ok({"message": "已退出登录"})
         self.console.clear_session_cookie(response)
         return response
+
+    # ------------------------------------------------------------------
+    # B站扫码登录
+    # ------------------------------------------------------------------
+
+    def _require_bilibili_login(self, request: web.Request) -> web.Response | None:
+        if not self.console.allow_remote_manage and not is_loopback(
+            self.console.request_ip(request)
+        ):
+            return _json_error(
+                "B站扫码登录默认只允许本机操作"
+                "（dashboard.allow_remote_manage=false）",
+                status=403,
+            )
+        return None
+
+    async def bilibili_login_page(self, request: web.Request) -> web.Response:
+        return web.Response(
+            text=LOGIN_PAGE,
+            content_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def bilibili_login_script(self, request: web.Request) -> web.Response:
+        return web.Response(
+            text=LOGIN_SCRIPT,
+            content_type="application/javascript",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def bilibili_login_status(self, request: web.Request) -> web.Response:
+        blocked = self._require_bilibili_login(request)
+        if blocked is not None:
+            return blocked
+        return _json_ok(self.console.bilibili_login.snapshot())
+
+    async def bilibili_login_start(self, request: web.Request) -> web.Response:
+        blocked = self._require_bilibili_login(request)
+        if blocked is not None:
+            return blocked
+        try:
+            snapshot = await self.console.bilibili_login.start()
+        except RuntimeError as exc:
+            return _json_error(str(exc), status=503)
+        return _json_ok(snapshot)
 
     # ------------------------------------------------------------------
     # 概览 / 系统 / 机器人

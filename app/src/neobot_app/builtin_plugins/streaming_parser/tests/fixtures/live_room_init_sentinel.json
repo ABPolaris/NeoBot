@@ -1,0 +1,19 @@
+{
+  "_comment": "真实抓取：GET api.live.bilibili.com/room/v1/Room/room_init?id=1",
+  "code": 0,
+  "message": "0",
+  "msg": "0",
+  "data": {
+    "room_id": 5440,
+    "short_id": 1,
+    "uid": 9617619,
+    "live_status": 2,
+    "live_time": -62170012800,
+    "is_hidden": false,
+    "is_locked": false,
+    "is_portrait": false,
+    "encrypted": false,
+    "room_shield": 1,
+    "special_type": 0
+  }
+}

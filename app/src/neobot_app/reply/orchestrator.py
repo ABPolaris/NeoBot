@@ -20,12 +20,7 @@ from neobot_app.prompt.store import get_template_value
 from neobot_app.reply._utils import entry_fingerprint
 from neobot_app.reply.debug import DebugHelper
 from neobot_app.reply.event import ReplyEvent, ReplyState
-from neobot_app.reply.postprocess import (
-    ReplyPostProcessResult,
-    ReplySplitPreview,
-    build_over_limit_guidance,
-    process_reply_text,
-)
+from neobot_app.reply.postprocess import ReplySplitPreview
 from neobot_app.reply.sender import ReplySender, SelfSentSink
 from neobot_app.reply.vision_context import (
     ReplyVisionContext,
@@ -281,6 +276,22 @@ def _redacted_tool_text(value: object, limit: int = _MAX_TOOL_LOG_CHARS) -> str:
 def _safe_tool_args(args: object) -> str:
     redacted = _redact_tool_value(args, drop_internal=True)
     return _redacted_tool_text(redacted, _MAX_TOOL_LOG_CHARS)
+
+
+def _render_tool_package_index(skill_manager: Any) -> str:
+    """把可加载工具包 + 工具名直接渲染进提示词，省掉模型先查询/看说明的一次调用。"""
+    if skill_manager is None:
+        return ""
+    names = getattr(skill_manager, "deferred_skill_names", None)
+    tool_names = getattr(skill_manager, "skill_tool_names", None)
+    if not names or not callable(tool_names):
+        return ""
+    lines: list[str] = []
+    for name in names:
+        tools = list(tool_names(name) or [])
+        if tools:
+            lines.append("- " + name + ": " + ", ".join(tools))
+    return "\n".join(lines)
 
 
 def _parse_tool_args(value: object) -> dict[str, Any]:
@@ -2243,6 +2254,14 @@ class ReplyOrchestrator:
                     "加载后本轮即可直接调用。"
                     "\n</Skill 操作说明>"
                 )
+            package_index = _render_tool_package_index(self._skill_manager)
+            if package_index:
+                prompt += (
+                    "\n\n<可加载工具包>\n"
+                    f"{package_index}\n"
+                    "清单已直接给出；需要某个包时直接调用 skills__load_tools 加载，无需先查询。"
+                    "\n</可加载工具包>"
+                )
 
         # 注入匹配的 Markdown 技能（插件 SKILL.md）
         if matched_skills:
@@ -2702,7 +2721,6 @@ class ReplyOrchestrator:
 
         # 5. Agent 循环（外层 while 支持私聊连续会话）
         max_iterations = self._get_agent_max_iterations()
-        ai_check_prompted = False
         is_private = (
             event.conversation_ref is not None
             and event.conversation_ref.kind == "private"
@@ -2788,7 +2806,6 @@ class ReplyOrchestrator:
             round_index += 1
             reply_sent = False
             cancelled = False
-            ai_check_prompted = False
             # 时间块分级:每轮(每次管线激活)重置为"尚未注入完整时间块"
             time_block_full_sent = False
             # 防重复提醒:每次管线激活只追加一次
@@ -3035,77 +3052,27 @@ class ReplyOrchestrator:
                     continue
                 if not tool_calls:
                     if not reply_sent:
-                        if ai_check_prompted or getattr(reply_toolset.executor, "ai_check_pending", False):
-                            # A review response is not a send decision. Fail closed
-                            # for prose (or an empty turn), including reviews started
-                            # by send_reply itself. Never send the earlier draft.
-                            event.error = "AI回复检查未通过：缺少明确的发送或取消决定，检查正文未发送"
-                            if not event.is_terminal:
-                                event.transition(ReplyState.FAILED)
-                            self._logger.warning(
-                                "AI 回复检查后没有工具调用，回复未发送",
-                                event_id=event.event_id, queue_key=queue_key,
-                            )
-                            self._record_debug(
-                                "ai_reply_check_without_tool_call", event,
-                                queue_key=queue_key, iteration=iteration + 1,
-                            )
-                            break
                         content = response.get("content", "")
                         text = (
                             content.strip()
                             if isinstance(content, str)
                             else str(content)
                         )
-                        if text:
-                            full_check = self._get_ai_reply_check()
-                            light_check = self._get_ai_reply_check_lightweight()
-                            need_check = full_check
-                            if not need_check and light_check:
-                                pre_check = process_reply_text(
-                                    text,
-                                    bot_name=self._get_bot_name(),
-                                    fallback_template=self._get_long_reply_fallback_template(),
-                                    max_length=self._get_long_reply_max_length(),
-                                    max_sentence_count=self._get_long_reply_max_sentence_count(),
-                                )
-                                need_check = pre_check.fallback_used
-                            if need_check and not ai_check_prompted:
-                                ai_check_prompted = True
-                                check_prompt = self._build_ai_reply_check_prompt(
-                                    text, record_preview=getattr(reply_toolset.executor, "remember_split_preview", None),
-                                )
-                                messages.append(
-                                    {"role": "user", "content": check_prompt}
-                                )
-                                self._record_debug(
-                                    "ai_reply_check_requested",
-                                    event,
-                                    queue_key=queue_key,
-                                    reply_text=text,
-                                    check_prompt=check_prompt,
-                                    check_mode="full" if full_check else "lightweight",
-                                )
-                                continue
-                            event.generated_text = text
-                            self._record_debug(
-                                "reply_generated",
-                                event,
-                                queue_key=queue_key,
-                                reply_text=text,
-                            )
-                            delivered = await self._send_reply(
+                        review_pending = bool(
+                            getattr(reply_toolset.executor, "ai_check_pending", False)
+                        )
+                        if text or review_pending:
+                            # agent 模式的对外发言只能经 send_reply/cancel。没有工具
+                            # 调用的正文是模型写给自己看的判断/草稿，直接发送就是
+                            # 把内部判断泄漏给用户；这里不重试、不追问，只留审计。
+                            self._handle_unsent_prose(
                                 event,
                                 text,
-                                self_sent=self._self_sent_sink(queue, queue_copy, queue_key),
+                                response,
+                                queue_key=queue_key,
+                                iteration=iteration + 1,
+                                review_pending=review_pending,
                             )
-                            if delivered is False:
-                                event.error = "回复内容清洗后为空，未发送"
-                                if not event.is_terminal:
-                                    event.transition(ReplyState.FAILED)
-                                self._record_debug("reply_output_dropped", event, queue_key=queue_key)
-                            else:
-                                reply_sent = True
                         else:
                             # 空轮次：正文为空且没有工具调用。旧实现在这里直接
                             # break，事件以 COMPLETED/err=None 收尾，回复丢失且
@@ -3680,6 +3647,55 @@ class ReplyOrchestrator:
         return (
             "模型返回空输出：本轮没有正文也没有工具调用"
             f"（finish_reason={finish_reason or '未提供'}）"
+        )
+
+    def _handle_unsent_prose(
+        self,
+        event: ReplyEvent,
+        text: str,
+        response: object,
+        *,
+        queue_key: str,
+        iteration: int,
+        review_pending: bool,
+    ) -> None:
+        """没有工具调用的正文不发送：agent 模式下发言只能走 send_reply/cancel。
+
+        正文通常是模型写出来的「要不要接话」判断或草稿，直接发送就是用户可见的
+        泄漏。这里不重试、不追问（追问只会让模型把草稿再说一遍并多烧一轮 token），
+        只把原文放进 debug 事件供审计，并把事件置为 FAILED。
+        """
+        if review_pending:
+            event.error = "AI回复检查未通过：缺少明确的发送或取消决定，检查正文未发送"
+            stage = "ai_reply_check_without_tool_call"
+        else:
+            event.error = (
+                "模型输出了正文但没有调用工具，内容未发送"
+                "（agent 模式必须调用 send_reply 或 cancel）"
+            )
+            stage = "unsent_prose_detected"
+        if not event.is_terminal:
+            try:
+                event.transition(ReplyState.FAILED)
+            except RuntimeError:
+                pass
+
+        self._logger.warning(
+            "模型输出正文但没有工具调用，回复未发送",
+            event_id=event.event_id,
+            queue_key=queue_key,
+            iteration=iteration,
+            review_pending=review_pending,
+            reply_text=text,
+        )
+        self._record_debug(
+            stage,
+            event,
+            queue_key=queue_key,
+            iteration=iteration,
+            reply_text=text,
+            review_pending=review_pending,
+            finish_reason=_extract_finish_reason(response) or None,
         )
 
     def _handle_empty_turn(
@@ -4625,51 +4641,6 @@ class ReplyOrchestrator:
         event.generated_text = text
         self._record_debug("reply_generated", event, reply_text=text, response=response)
         return text
-
-    def _build_ai_reply_check_prompt(
-        self, text: str, *, record_preview: Callable[[ReplyPostProcessResult], None] | None = None,
-    ) -> str:
-        result = process_reply_text(
-            text,
-            bot_name=self._get_bot_name(),
-            fallback_template=self._get_long_reply_fallback_template(),
-            max_length=self._get_long_reply_max_length(),
-            max_sentence_count=self._get_long_reply_max_sentence_count(),
-        )
-        if record_preview is not None:
-            record_preview(result)
-        lines = [
-            "[AI回复检查]",
-            "你刚才准备直接发送以下回复，但配置要求先检查切分后的分条回复。",
-            f"原文：{result.original_text}",
-            "切分结果：",
-        ]
-        for index, message in enumerate(result.messages, start=1):
-            lines.append(f"{index}. {message}")
-        if result.fallback_used:
-            lines.append(
-                f"注意：因 {result.reason or '未知原因'}，已触发默认回复替换，当前切分结果为默认回复文本。"
-            )
-            # 明确给出出路：Markdown 直发 / 分批发送 / 精简重发，三选一。
-            lines.extend(
-                build_over_limit_guidance(
-                    max_length=self._get_long_reply_max_length(),
-                    max_sentence_count=self._get_long_reply_max_sentence_count(),
-                )
-            )
-            lines.append(
-                "若仍要发送上面这段默认回复，请调用 send_reply，传入原 text、"
-                "segments 为上述切分结果、ai_check_approved=true。"
-                "如不应发送任何回复，请调用 cancel。"
-            )
-        else:
-            lines.append(
-                "如果没有严重问题或歧义，请调用 send_reply，传入原 text、segments 为上述切分结果、ai_check_approved=true。"
-            )
-            lines.append(
-                "如果切分有问题但仍要发送原文，请调用 send_reply 并设置 send_original=true；不应发送则调用 cancel。"
-            )
-        return "\n".join(lines)
 
     # ── 发送回复 ──
 

@@ -22,6 +22,7 @@ from PIL import Image
 from neobot_app.image.source import IMAGE_FETCH_TIMEOUT_SECONDS, ImageSourceResolver
 from neobot_app.image.unavailable import clean_expired_text, is_expired_message
 from neobot_app.skills.base import SkillModule
+from neobot_app.utils.prompt_text import single_line_prompt_text
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_BYTES = 20 * 1024 * 1024
@@ -53,6 +54,23 @@ class ImageContextResult(str):
 
 def _result(metadata: dict, parts: list[dict] | None = None) -> ImageContextResult:
     return ImageContextResult(json.dumps(metadata, ensure_ascii=False), parts)
+
+
+def _message_sender_text(message: Any) -> str:
+    """取一条消息的发送者显示名（与聊天记录/默认图附录同一套清洗规则）。"""
+    if message is None:
+        return ""
+    if isinstance(message, dict):
+        sender = message.get("sender")
+        if isinstance(sender, dict):
+            return single_line_prompt_text(sender.get("nickname") or sender.get("card"))
+        return ""
+    sender = getattr(message, "sender", None)
+    if sender is None:
+        return ""
+    return single_line_prompt_text(
+        getattr(sender, "nickname", None) or getattr(sender, "card", None)
+    )
 
 
 def _numbering_mapping(raw: dict) -> dict[int, int]:
@@ -264,6 +282,42 @@ class ImageContextSkill(SkillModule):
         field = {"sources": "source", "image_path_list": "image_path", "image_url_list": "image_url"}[name]
         return [dict(args, **{field: value}) for value in values]
 
+    def _chat_sender_label(self, resolved: dict, message_id: int | None) -> str:
+        """按 pipeline_key 找到消息队列,复用 queue 的发送者标签规则（重名带 QQ 后缀）。"""
+        pipeline_key = resolved.get("pipeline_key")
+        if message_id is None or not isinstance(pipeline_key, str) or ":" not in pipeline_key:
+            return ""
+        conv_kind, _, conv_id = pipeline_key.partition(":")
+        if conv_kind == "group":
+            queue = self._resolver._group_queue
+        elif conv_kind in ("private", "friend"):
+            queue = self._resolver._friend_queue
+        else:
+            return ""
+        if queue is None or not conv_id:
+            return ""
+        try:
+            entries = queue.entries(conv_id)
+            labels, labels_by_user = queue._build_sender_labels(entries)
+            message = queue.find_by_message_id(conv_id, message_id)
+            if message is None:
+                for entry in entries:
+                    for replied in getattr(entry, "replied_messages", None) or []:
+                        if getattr(replied, "message_id", None) == message_id:
+                            message = replied
+                            break
+                    if message is not None:
+                        break
+            if message is None:
+                return ""
+            return single_line_prompt_text(
+                queue._message_sender_label(
+                    message, sender_labels=labels, sender_labels_by_user=labels_by_user
+                )
+            )
+        except (AttributeError, TypeError, KeyError):
+            return ""
+
     async def _source_args(self, args: dict) -> tuple[dict, str]:
         fields = [key for key in _SOURCE_FIELDS if args.get(key) is not None]
         if len(fields) != 1:
@@ -414,9 +468,12 @@ class ImageContextSkill(SkillModule):
                     total += size
                     if total > MAX_TOTAL_BYTES:
                         raise ValueError("图片合计超过单次20 MiB限制")
+                    # 引用的消息只拿到了消息段、没有发送者信息：只给当前消息图片标发送者。
+                    sender = _message_sender_text(message) if kind != "reply" else ""
                     label = f"消息 {source_message_id if source_message_id is not None else '(当前)'} 第{source_image_index + 1}张图片"
                     images.append(dict(metadata, index=len(parts), source_kind=kind,
-                                       message_id=source_message_id, image_index=source_image_index, label=label))
+                                       message_id=source_message_id, image_index=source_image_index,
+                                       sender=sender, label=label))
                     parts.append(part)
             metadata = {"ok": True, "count": len(parts), "images": images}
             if truncated:
@@ -473,12 +530,16 @@ class ImageContextSkill(SkillModule):
                         image_metadata.update(image_index=image_index, message_id=message_id)
                         if "msg_number" in resolved:
                             image_metadata["msg_number"] = resolved["msg_number"]
+                        sender = self._chat_sender_label(resolved, message_id)
+                        if sender:
+                            image_metadata["sender"] = sender
+                        sender_prefix = f"发送者：{sender}，" if sender else ""
                         if message_id is not None:
-                            image_metadata["label"] = f"消息 {message_id} 第{image_index + 1}张图片"
+                            image_metadata["label"] = f"{sender_prefix}消息 {message_id} 第{image_index + 1}张图片"
                         elif "msg_number" in resolved:
-                            image_metadata["label"] = f"消息编号 {resolved['msg_number']} 第{image_index + 1}张图片"
+                            image_metadata["label"] = f"{sender_prefix}消息编号 {resolved['msg_number']} 第{image_index + 1}张图片"
                         elif "chat_flow_id" in resolved:
-                            image_metadata["label"] = f"聊天流图片索引 {image_index}"
+                            image_metadata["label"] = f"{sender_prefix}聊天流图片索引 {image_index}"
                     images.append(image_metadata)
             return _result({"ok": True, "count": len(parts), "images": images}, parts)
         except ValueError as exc:

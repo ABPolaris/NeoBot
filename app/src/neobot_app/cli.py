@@ -1121,6 +1121,8 @@ def main() -> None:
         cmd_firewall_open(args)
     elif args.command == "init":
         cmd_init(args)
+    elif args.command == "doctor":
+        cmd_doctor(args)
     else:
         # 无子命令 → 启动机器人
         cmd_run(args)

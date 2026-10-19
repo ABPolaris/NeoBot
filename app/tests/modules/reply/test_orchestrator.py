@@ -19,6 +19,7 @@ from neobot_adapter.model.message import (
 from neobot_app.message.queue import MessageQueue, QueueEntry, QueueEntryType
 from neobot_app.prompt.store import TEMPLATES_DIR, PromptStore
 from neobot_app.reply.orchestrator import (
+    _render_tool_package_index,
     EMPTY_TURN_NO_OUTPUT,
     EMPTY_TURN_TRUNCATED,
     ReplyOrchestrator,
@@ -128,6 +129,23 @@ def _make_decision() -> WillingDecision:
         should_reply=True,
         reasons=("测试触发",),
     )
+
+
+def _send_reply_response(text: str) -> dict:
+    """agent 模式唯一合法的发言路径：模型必须调用 send_reply，正文直发会失败。"""
+    return {
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call-send-reply",
+                "type": "function",
+                "function": {
+                    "name": "send_reply",
+                    "arguments": json.dumps({"text": text}),
+                },
+            }
+        ],
+    }
 
 
 def _make_orchestrator(
@@ -256,7 +274,7 @@ async def test_wait_tool_agent_loop_previous_entries_initialized(monkeypatch):
                     }
                 ],
             },
-            {"content": "收到", "tool_calls": []},
+            _send_reply_response("收到"),
         ]
     )
     orch = _make_orchestrator(provider=provider)
@@ -289,7 +307,7 @@ async def test_wait_tool_agent_loop_previous_entries_initialized(monkeypatch):
 
 async def test_private_pipeline_event_reaches_completed_state(monkeypatch):
     """私聊回复管线结束后事件必须进入 COMPLETED 终态并写入 completed_at。"""
-    provider = _ScriptedProvider([{"content": "你好", "tool_calls": []}])
+    provider = _ScriptedProvider([_send_reply_response("你好")])
     orch = _make_orchestrator(provider=provider)
     queue = MessageQueue()
 
@@ -391,7 +409,7 @@ async def test_poke_failure_keeps_raw_error_for_model(monkeypatch):
     )
     provider = _ScriptedProvider([
         {"content": "", "tool_calls": [_poke_call("p1")]},
-        {"content": "知道了", "tool_calls": []},
+        _send_reply_response("知道了"),
     ])
 
     async def _failed(action, params):
@@ -413,7 +431,7 @@ async def test_identical_failing_tool_calls_get_soft_hint_but_still_execute(monk
         {"content": "", "tool_calls": [_poke_call("p2")]},
         {"content": "", "tool_calls": [_poke_call("p3")]},
         {"content": "", "tool_calls": [_poke_call("p4")]},
-        {"content": "算了", "tool_calls": []},
+        _send_reply_response("算了"),
     ])
     executed: list = []
 
@@ -985,7 +1003,7 @@ async def test_agent_mode_all_skills_declare_allowed_tools_passes_union(monkeypa
     monkeypatch.setattr(tools_module, "build_reply_toolset", fake_build_reply_toolset)
 
     orch = _make_orchestrator(
-        provider=_ScriptedProvider([{"content": "收到", "tool_calls": []}])
+        provider=_ScriptedProvider([_send_reply_response("收到")])
     )
     orch._markdown_skills = _FakeMarkdownSkills([_AllowedSkill(), _AllowedSkill2()])
     queue = MessageQueue()
@@ -1028,7 +1046,7 @@ async def test_agent_mode_one_skill_without_allowed_tools_disables_restriction(
     monkeypatch.setattr(tools_module, "build_reply_toolset", fake_build_reply_toolset)
 
     orch = _make_orchestrator(
-        provider=_ScriptedProvider([{"content": "收到", "tool_calls": []}])
+        provider=_ScriptedProvider([_send_reply_response("收到")])
     )
     orch._markdown_skills = _FakeMarkdownSkills([_AllowedSkill(), _NoAllowedSkill()])
     queue = MessageQueue()
@@ -1064,7 +1082,7 @@ async def test_agent_mode_one_skill_without_allowed_tools_attribute_disables_res
     monkeypatch.setattr(tools_module, "build_reply_toolset", fake_build_reply_toolset)
 
     orch = _make_orchestrator(
-        provider=_ScriptedProvider([{"content": "收到", "tool_calls": []}])
+        provider=_ScriptedProvider([_send_reply_response("收到")])
     )
     orch._markdown_skills = _FakeMarkdownSkills(
         [_AllowedSkill(), _MissingAllowedSkill()]
@@ -1100,7 +1118,7 @@ async def test_agent_mode_no_allowed_tools_passes_none(monkeypatch):
     monkeypatch.setattr(tools_module, "build_reply_toolset", fake_build_reply_toolset)
 
     orch = _make_orchestrator(
-        provider=_ScriptedProvider([{"content": "收到", "tool_calls": []}])
+        provider=_ScriptedProvider([_send_reply_response("收到")])
     )
     orch._markdown_skills = _FakeMarkdownSkills([_NoAllowedSkill()])
     queue = MessageQueue()
@@ -1163,7 +1181,7 @@ async def test_agent_mode_allowed_tools_keeps_emoji_out_of_prompt(monkeypatch):
     """限制激活时：工具集受限、提示词带限制说明，且表情包清单不进入提示词。"""
     captured = _capture_toolset_build(monkeypatch)
     orch = _make_orchestrator(
-        provider=_ScriptedProvider([{"content": "收到", "tool_calls": []}])
+        provider=_ScriptedProvider([_send_reply_response("收到")])
     )
     orch._markdown_skills = _FakeMarkdownSkills([_AllowedSkill()])
     orch._config.chat.emoji_page_size = 50  # 假配置缺失属性返回 None，需显式给定
@@ -1191,7 +1209,7 @@ async def test_agent_mode_no_restriction_also_keeps_emoji_out_of_prompt(monkeypa
     """不限制工具时同样不注入表情包清单。"""
     captured = _capture_toolset_build(monkeypatch)
     orch = _make_orchestrator(
-        provider=_ScriptedProvider([{"content": "收到", "tool_calls": []}])
+        provider=_ScriptedProvider([_send_reply_response("收到")])
     )
     orch._markdown_skills = _FakeMarkdownSkills([_NoAllowedSkill()])
     orch._config.chat.emoji_page_size = 50  # 假配置缺失属性返回 None，需显式给定
@@ -1221,7 +1239,11 @@ async def test_disallowed_tool_is_rejected_before_consuming_before_hook(monkeypa
             self.before_tool_calls = 0
 
         async def dispatch_envelope(self, envelope: RuntimeEnvelope) -> RuntimeEnvelope:
-            if envelope.stage == "tool.call.before":
+            # 只对目标工具 poke_user 计数：send_reply 是合法的收尾调用。
+            if (
+                envelope.stage == "tool.call.before"
+                and envelope.payload.get("tool_name") == "poke_user"
+            ):
                 self.before_tool_calls += 1
                 envelope.consume("hook bypassed authorization")
             return envelope
@@ -1241,7 +1263,7 @@ async def test_disallowed_tool_is_rejected_before_consuming_before_hook(monkeypa
                     }
                 ],
             },
-            {"content": "收到", "tool_calls": []},
+            _send_reply_response("收到"),
         ]
     )
     events = _ConsumeToolHook()
@@ -1310,7 +1332,7 @@ async def test_tool_after_hook_result_is_finally_capped_and_logs_redact_args(
                     }
                 ],
             },
-            {"content": "收到", "tool_calls": []},
+            _send_reply_response("收到"),
         ]
     )
     logger = _Logger()
@@ -1461,7 +1483,7 @@ async def test_tool_after_event_payload_args_are_redacted(monkeypatch):
                     }
                 ],
             },
-            {"content": "收到", "tool_calls": []},
+            _send_reply_response("收到"),
         ]
     )
     hook = _Hook()
@@ -1564,7 +1586,7 @@ async def test_reply_tool_executor_released_after_pipeline(
 
     monkeypatch.setattr(tools_module, "build_reply_toolset", _build_toolset)
     orch = _make_orchestrator(
-        provider=_ScriptedProvider([{"content": "收到", "tool_calls": []}])
+        provider=_ScriptedProvider([_send_reply_response("收到")])
     )
     queue = MessageQueue()
 
@@ -1782,7 +1804,7 @@ async def test_tool_before_rewrite_updates_execution_and_redacted_after_args(
                     }
                 ],
             },
-            {"content": "done", "tool_calls": []},
+            _send_reply_response("done"),
         ]
     )
     orch = ReplyOrchestrator(
@@ -2015,7 +2037,8 @@ async def test_tool_timeout_emits_after_event_with_safe_diagnostics(
     monkeypatch.setattr(orch, "_suspend_private_chat", _no_suspend)
     event = await _run_agent_turn(orch, MessageQueue(), "123456")
 
-    assert event.state.name == "COMPLETED"
+    # 假工具集没有 send_reply；正文收尾按新契约判失败，但超时诊断仍须完整。
+    assert event.state.name == "FAILED"
     assert len(events.timeouts) == 1
     safe_args = str(events.timeouts[0]["tool_args"])
     assert "visible" in safe_args
@@ -2039,7 +2062,7 @@ def _cost_orchestrator(*, calculator=None):
     orch = ReplyOrchestrator(
         adapter=_FakeAdapter(),
         prompt_builder=_FakePromptBuilder(),
-        provider=_ScriptedProvider([{"content": "收到", "tool_calls": []}]),
+        provider=_ScriptedProvider([_send_reply_response("收到")]),
         config=_CostFakeConfig(),
         cache_calculator=calculator,
     )
@@ -2128,10 +2151,10 @@ async def test_cost_pipeline_extends_group_lifespan(monkeypatch):
 
     provider = _ScriptedProvider(
         [
-            {"content": "回复1", "tool_calls": []},
-            {"content": "回复2", "tool_calls": []},
-            {"content": "回复3", "tool_calls": []},
-            {"content": "回复4", "tool_calls": []},
+            _send_reply_response("回复1"),
+            _send_reply_response("回复2"),
+            _send_reply_response("回复3"),
+            _send_reply_response("回复4"),
         ]
     )
     orch = ReplyOrchestrator(
@@ -2178,8 +2201,8 @@ async def test_cost_pipeline_disabled_keeps_base_lifespan(monkeypatch):
 
     provider = _ScriptedProvider(
         [
-            {"content": "回复1", "tool_calls": []},
-            {"content": "回复2", "tool_calls": []},
+            _send_reply_response("回复1"),
+            _send_reply_response("回复2"),
         ]
     )
     orch = ReplyOrchestrator(
@@ -2240,9 +2263,15 @@ async def test_native_vision_tool_images_and_live_fallback(monkeypatch, degrade)
             }} for i in range(2)
         ],
     }
-    responses = [first, {"role": "assistant", "content": "未看到图" if degrade else "红色", "tool_calls": []}]
     if degrade:
-        responses.append({"role": "assistant", "content": "已回退", "tool_calls": []})
+        # 退化发生在第二次调用；这条正文用于触发一次带解析工具的重试。
+        responses = [
+            first,
+            {"role": "assistant", "content": "未看到图", "tool_calls": []},
+            _send_reply_response("已回退"),
+        ]
+    else:
+        responses = [first, _send_reply_response("红色")]
     provider = VisionProvider(responses)
     skills = SkillManager()
     skills.register(ImageContextSkill())
@@ -2327,7 +2356,7 @@ async def test_vision_fallback_on_final_iteration_gets_one_recovery_turn(monkeyp
 
     provider = Provider([
         {"role": "assistant", "content": "尚未看到图", "tool_calls": []},
-        {"role": "assistant", "content": "已恢复", "tool_calls": []},
+        _send_reply_response("已恢复"),
     ])
     orch = _make_orchestrator(provider=provider, config=Config())
     monkeypatch.setattr(orch, "_suspend_private_chat", AsyncMock(return_value=([], None)))
@@ -2361,7 +2390,7 @@ async def test_agent_default_images_are_labelled_only_at_prompt_end(monkeypatch,
         message = _make_private_message(message_id=i)
         message.message = [MessageSegment(type="image", data={"file": f"base64://{encoded}"})]
         queue.push("123456", message)
-    provider = _ScriptedProvider([{"role": "assistant", "content": "绿色", "tool_calls": []}])
+    provider = _ScriptedProvider([_send_reply_response("绿色")])
     provider.native_vision = True
     orch = _make_orchestrator(provider=provider, prompt_builder=PromptBuilder())
     monkeypatch.setattr(orch, "_get_native_vision_default_image_count", lambda: default_count)
@@ -2443,11 +2472,11 @@ class _GroupNudgeConfig(_FakeConfig):
 
 
 def _tool_round_responses(count: int, *, final: str = "好了") -> list[dict]:
-    """count 轮工具调用 + 一条最终回复的脚本。"""
+    """count 轮工具调用 + 一次 send_reply 收尾的脚本。"""
     return [
         {"content": "", "tool_calls": [_poke_call(f"p{index}")]}
         for index in range(count)
-    ] + [{"content": final, "tool_calls": []}]
+    ] + [_send_reply_response(final)]
 
 
 def _texts(messages: list) -> list[str]:
@@ -2621,7 +2650,7 @@ async def test_silent_nudge_time_trigger(monkeypatch):
     provider = _ClockProvider(
         [
             {"content": "", "tool_calls": [_poke_call("p0")]},
-            {"content": "好了", "tool_calls": []},
+            _send_reply_response("好了"),
         ]
     )
 
@@ -2708,7 +2737,7 @@ async def test_reply_sent_clears_nudge_counter(monkeypatch):
                     }
                 ],
             },
-            {"content": "好了", "tool_calls": []},
+            _send_reply_response("好了"),
         ]
     )
 
@@ -2731,7 +2760,7 @@ async def test_time_block_full_then_short_within_activation(monkeypatch):
         [
             {"content": "", "tool_calls": [_poke_call("p0")]},
             {"content": "", "tool_calls": [_poke_call("p1")]},
-            {"content": "好了", "tool_calls": []},
+            _send_reply_response("好了"),
         ]
     )
 
@@ -2761,8 +2790,8 @@ async def test_time_block_full_injected_again_in_new_activation(monkeypatch):
     provider = _ScriptedProvider(
         [
             {"content": "", "tool_calls": [_poke_call("p0")]},
-            {"content": "回复1", "tool_calls": []},
-            {"content": "回复2", "tool_calls": []},
+            _send_reply_response("回复1"),
+            _send_reply_response("回复2"),
         ]
     )
 
@@ -2789,7 +2818,7 @@ async def test_time_blocks_are_absent_when_current_time_disabled(monkeypatch):
     provider = _ScriptedProvider(
         [
             {"content": "", "tool_calls": [_poke_call("p0")]},
-            {"content": "好了", "tool_calls": []},
+            _send_reply_response("好了"),
         ]
     )
 
@@ -2813,7 +2842,7 @@ async def test_avoid_repeat_appended_once_per_activation_verbatim(monkeypatch):
     provider = _ScriptedProvider(
         [
             {"content": "", "tool_calls": [_poke_call("p0")]},
-            {"content": "好了", "tool_calls": []},
+            _send_reply_response("好了"),
         ]
     )
 
@@ -2832,7 +2861,7 @@ async def test_avoid_repeat_appended_once_per_activation_verbatim(monkeypatch):
 async def test_avoid_repeat_can_be_disabled_without_touching_time_block(monkeypatch):
     """[avoid_repeat] enabled = false → 不再追加,时间块行为不变。"""
     text = _section_text("avoid_repeat")
-    provider = _ScriptedProvider([{"content": "好了", "tool_calls": []}])
+    provider = _ScriptedProvider([_send_reply_response("好了")])
 
     await _run_agent_pipeline(
         monkeypatch,
@@ -2870,3 +2899,18 @@ async def test_common_path_appends_avoid_repeat_once(monkeypatch):
     assert _count_content(messages, text) == 1
     await orch.shutdown()
 
+
+
+def test_render_tool_package_index_lists_tools_directly():
+    """工具包清单直接进提示词：包名 + 工具名，空包不列。"""
+    manager = SimpleNamespace(
+        deferred_skill_names=["agent_tools_web", "empty_pkg"],
+        skill_tool_names=lambda name: {
+            "agent_tools_web": ["agent_tools__web_search", "agent_tools__web_fetch"],
+            "empty_pkg": [],
+        }[name],
+    )
+    text = _render_tool_package_index(manager)
+    assert "agent_tools_web: agent_tools__web_search, agent_tools__web_fetch" in text
+    assert "empty_pkg" not in text
+    assert _render_tool_package_index(None) == ""

@@ -1,0 +1,23 @@
+{
+  "code": 0,
+  "message": "0",
+  "msg": "0",
+  "data": {
+    "room_id": 21452505,
+    "short_id": 5440,
+    "uid": 401742377,
+    "live_status": 1,
+    "live_time": 1700000000,
+    "is_hidden": false,
+    "is_locked": false,
+    "is_portrait": false,
+    "encrypted": false,
+    "room_shield": 0,
+    "special_type": 0,
+    "hidden_till": 0,
+    "lock_till": 0,
+    "need_p2p": 0,
+    "pwd_verified": false,
+    "is_sp": 0
+  }
+}

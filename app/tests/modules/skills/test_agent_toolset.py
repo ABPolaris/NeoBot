@@ -124,6 +124,39 @@ def test_live_toolset_reflects_activation_changes():
     assert "gallery__list" in _names(toolset.definitions())
 
 
+async def test_live_toolset_survives_merge_and_keeps_loading():
+    """Toolset.merge 不能吃掉 LiveToolset 的动态工具面（维护 Agent 的根因）。"""
+    from neobot_chat.tools.toolset import Toolset
+
+    executor = SkillToolsetExecutor(_manager(), resident={"sandbox_maintenance"})
+    merged = Toolset.merge([None, LiveToolset(executor=executor)])
+    assert {"sandbox_maintenance__scan", LOADER_TOOL_NAME} <= _names(merged.definitions())
+
+    executor.activation.load({"skills": ["gallery"]})
+    assert "gallery__list" in _names(merged.definitions())
+    assert await merged.executor.execute("gallery__list", {}) == "ok:list"
+
+
+def test_merge_exposes_all_five_sandbox_maintenance_tools():
+    """维护 Agent 首轮必须拿到 5 个 sandbox_maintenance__* 工具。"""
+    from neobot_app.skills.sandbox_maintenance_skill import SandboxMaintenanceSkill
+    from neobot_chat.tools.toolset import Toolset
+
+    manager = SkillManager(eager_tool_skills=set())
+    manager.register(SandboxMaintenanceSkill())
+    merged = Toolset.merge(
+        [None, LiveToolset(SkillToolsetExecutor(manager, resident={"sandbox_maintenance"}))]
+    )
+
+    assert {
+        "sandbox_maintenance__scan_temp_files",
+        "sandbox_maintenance__clean_temp_files",
+        "sandbox_maintenance__trigger_maintenance",
+        "sandbox_maintenance__get_maintenance_status",
+        "sandbox_maintenance__check_capacity",
+    } <= _names(merged.definitions())
+
+
 def test_live_toolset_matches_plain_toolset_shape():
     """LiveToolset 必须仍是 Toolset（Agent 依赖其接口）。"""
     from neobot_chat.tools.toolset import Toolset

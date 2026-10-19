@@ -1,0 +1,162 @@
+# NeoBot_StreamingParser
+
+NeoBot 的流媒体平台解析插件。一期聚焦 **B 站直播间监听**：自动发现开播/下播、推送原创渲染的卡片，并可选触发一次 AI 回复。
+
+协议实现参考 [@ikenxuan/amagi](https://github.com/ikenxuan/amagi)（TypeScript），本插件用**纯 Python** 重写，并在真实流量上校准过若干参考项目没有记录的行为。
+
+> 当前版本：**v0.2.0（一期已落地）**
+
+## 功能
+
+- **直播间监听**：按群订阅直播间，支持房间号、短号、直播间链接、UP 主空间链接；
+- **开播 / 下播检测**：后台轮询直播状态，识别状态跳变，两者都可以独立开关推送；
+- **卡片推送**：开播/下播各推一张原创设计的卡片，三种风格（默认每次随机）；
+- **开播状态总览**：一条命令生成一张图，把本群关注的全部主播按头像 + 昵称排列，开播中的主播带粉色圆环与 LIVE 角标；
+- **可选 AI 回复**：推送后默认再触发一次 AI 回复，把"某主播开播了、你已经通知过"告诉 agent，由它自己决定说不说话；开播与下播的 AI 回复可以分别开关。
+
+## 安装
+
+把本仓库目录放进 NeoBot 的插件目录即可：
+
+```
+<NeoBot>/app/src/neobot_app/builtin_plugins/streaming_parser/ (官方内置插件，默认开启)
+```
+
+官方内置插件随本体分发、默认开启；NeoBot 启动时扫描插件目录，发现含 `__init__.py` 且导出 `plugin = Plugin(...)` 的目录就会加载。依赖全部复用本体已有的 `httpx` / `pydantic` / `sqlalchemy`，不额外引入；卡片渲染走本体已有的 Chromium 截图端口。
+
+## 命令
+
+命令注册在**宿主命令表**里，因此 `/help` 能列出并查看详情（含用法、参数、权限与来源标记），
+回复也沿用 `/help` 的那套卡片渲染，渲染不可用时自动退化成等文本。
+
+- 群聊：需要**先 @机器人**再发命令（宿主统一规则，`/help` 同理）；私聊直接发即可。
+- 权限：改订阅与设置的命令要求**次级管理员**，`/监听列表` 与 `/开播状态` 所有人可用。
+
+| 命令 | 说明 |
+|---|---|
+| `/监听 <房间号\|短号\|链接>` | 让本群开始监听该直播间，**自动开启它的开播与下播推送** |
+| `/取消监听 <房间号\|短号\|链接>` | 取消监听 |
+| `/监听列表` | 列出本群监听的全部直播间与推送开关 |
+| `/开播推送 <房间号> 开\|关` | 单独开关某个直播间的开播推送 |
+| `/下播推送 <房间号> 开\|关` | 单独开关某个直播间的下播推送 |
+| `/开播状态` | 生成总览图：本群关注的主播 + 开播中的粉色圆环 |
+| `/卡片风格 [风格名]` | 查看 / 设置本群的卡片风格 |
+| `/config` | 查看与修改本群设置（含 AI 回复开关） |
+
+`/config` 支持的键：
+
+```
+/config                          查看当前设置与用法
+/config 开播AI 开|关              开播推送后是否触发一次 AI 回复
+/config 下播AI 开|关              下播推送后是否触发一次 AI 回复
+/config 风格 sakura|neon|minimal|随机
+/config 开播推送默认 开|关        本群新订阅的默认开播推送
+/config 下播推送默认 开|关        本群新订阅的默认下播推送
+```
+
+**只要卡片、不要 AI 回复**：`/config 开播AI 关`。
+
+`/开播状态` 会在出图前**实时查询**一次各直播间的状态（不是拿最近一次轮询的旧结果），
+所以刚订阅、或直播间状态刚变化时，看到的也是当前真实状态；查询失败才回落到库里最近一次的结果。
+状态分三档：`直播中`（粉色圆环 + LIVE 角标，算开播）、`轮播中`（不算开播）、`未开播`。
+
+## 卡片风格
+
+三种风格，默认 `random`（每次随机挑一个），也可以固定：
+
+| 风格 | 视觉 |
+|---|---|
+| `sakura` | 樱花粉浅色：粉白渐变底、四角 CSS 花瓣、白卡大圆角、粉色胶囊状态标签 |
+| `neon` | 霓虹暗色：深底 + 青紫网格与扫描线、双层辉光、粉紫渐变状态胶囊 |
+| `minimal` | 极简浅色：纯白底 + 细边框、零阴影、以排版为主 |
+
+美术全部**原创绘制**，只参考了 B 站官方直播界面的风格取向（主色 `#FB7299`、圆角卡片、开播头像的粉色圆环），没有复用任何第三方项目的图片或样式资源。所有视觉元素都是纯 CSS（渐变 / 圆角 / 阴影 / 伪元素），模板里没有脚本、没有外链、没有任何构建步骤。
+
+随包分发的中文字体是 [FusionPixel](https://github.com/TakWolf/fusion-pixel-font)（OFL 许可），许可文本在 `templates/fonts/LICENSE-FusionPixel-OFL.txt`。
+
+## 效果示例
+
+`docs/samples/` 是用真实数据渲染出来的成品（`manifest.json` 记录了渲染时用的数据）：
+
+| 文件 | 内容 |
+|---|---|
+| `card_{sakura,neon,minimal}_live.png` | 三种风格的开播卡片 |
+| `card_{sakura,neon,minimal}_live_end.png` | 同三种风格的下播卡片（注意开播时间那行会整块消失） |
+| `overview_{sakura,neon,minimal}.png` | 开播状态总览图：开播中的主播带粉色圆环 + LIVE 角标，未开播的降透明度、无圆环 |
+| `manifest.json` | 渲染时用的真实数据快照 |
+
+**样例图不入库**：里面有真实 UP 的头像与封面，`docs/samples/*.png` 已在 `.gitignore` 里排除，
+只在本地保留。换任何人重新生成都可以：
+
+```bash
+python research/tools/render_samples.py <UID>
+```
+
+脚本走的是生产渲染路径（同一个 `CardRenderer`、同一批模板、同一份字体），
+只有截图端口用 Playwright 顶替宿主的 Chromium 服务。
+
+## 配置
+
+`plugin.toml` 的 `[config]` 是打包默认值，用户实际配置落在 `<NeoBot>/app/data/plugins_data/streaming_parser/config.toml`：
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `poll_interval_seconds` | 60 | 轮询间隔，开播检测延迟上限基本等于该值 |
+| `request_timeout` | 10.0 | 单次 HTTP 超时（秒） |
+| `cookie` | 空 | B 站 Cookie，留空为匿名请求 |
+| `user_agent` | 空 | 自定义 UA |
+| `poll_concurrency` | 4 | 同时轮询的房间数 |
+| `default_card_style` | random | 默认卡片风格 |
+| `default_push_live` / `default_push_live_end` | true / true | 监听新直播间时自动开启的推送（两个都默认开） |
+| `default_ai_reply_live` / `default_ai_reply_live_end` | true / false | 推送后是否默认触发 AI 回复 |
+| `overview_max_hosts` | 30 | 总览图最多显示多少位 |
+| `asset_cache_days` | 14 | 头像/封面本地缓存天数 |
+| `render_timeout` / `render_scale` | 30.0 / 2.0 | 渲染超时与 2x 高清倍率 |
+
+## 工作原理
+
+1. **轮询**：只检查「至少被一个群订阅」的房间，用 `get_info` 一次拿全直播状态、标题、封面、分区、人气；
+2. **跳变**：状态存进 `room_states`，只在「未播 → 直播中」或「直播中 → 未播」时通知；**首次见到某个房间只记录基线不通知**，所以重启不会误报；
+3. **推送**：渲染卡片 → `ctx.send_image` 发到群；渲染不可用（没装浏览器等）时自动降级成等价纯文本，绝不报错；
+4. **AI 回复**：优先走宿主 `notification_hub.publish`（通知会镜像进消息队列，agent 后续轮次也能看到），失败则降级到 `reply_orchestrator.start_background_reply`，再失败就写 `record_notification` 兜底。命令与轮询都不在消息事件里，所以不能用 `ctx.agent_reply`（它依赖事件上下文）。
+
+## 目录结构
+
+```
+.
+├── plugin.toml            # 插件清单 + 打包默认配置
+├── __init__.py            # 入口：Plugin、数据库、生命周期、轮询任务
+├── config.py              # 配置模型（pydantic）
+├── db.py                  # 表结构、迁移、仓储函数与只读视图
+├── commands.py            # 订阅类命令
+├── settings_commands.py   # 总览图 / 卡片风格 / config
+├── poller.py              # 开播下播轮询与跳变判定
+├── notify.py              # 推送：卡片 + 可选 AI 回复
+├── render.py              # 模板填充与截图端口调用
+├── assets.py              # 头像/封面下载与本地缓存
+├── bilibili/              # B 站协议层（URL / 请求头 / 判定 / 模型 / 客户端）
+├── templates/             # 6 个 HTML 模板 + 随包字体（零构建）
+├── tests/                 # 单元测试（含模板契约测试）
+└── research/              # 【不入库】协议调研与探针脚本
+```
+
+## 测试
+
+```
+cd app/data/plugins/streaming_parser
+<python> -m pytest                 # 离线用例（默认跳过联网）
+<python> -m pytest -m network      # 真实 B 站接口冒烟测试
+```
+
+测试覆盖协议 URL 与请求头基线、WBI 签名向量、业务码判定、响应模型归一化、重试退避、数据表读写、跳变判定、模板占位符契约与降级路径。没有 NeoBot 依赖的环境（如 CI）会用一个最小 modloader 替身跑纯逻辑用例，需要真实数据库的用例显式跳过而不是假装通过。
+
+## 已知限制
+
+- 弹幕长连接（P2）尚未实现：参考项目在这一点上是空白，协议需要另行调研；
+- 下播判定的最小粒度为一次轮询间隔，短时间内的「开播 → 秒下播」可能被合并；
+- 轮播（live_status = 2）不算开播，从轮播切到真直播才算。
+
+## 许可证
+
+[MIT](LICENSE)
+

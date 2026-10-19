@@ -49,6 +49,8 @@ KNOWN_SECTIONS = (
     "avoid_repeat",
     "silent_nudge",
     "long_task_progress",
+    "human_feel",
+    "stale_topic",
     "friend_chat_hint",
     "group_chat_resume",
     "new_member_profiles",

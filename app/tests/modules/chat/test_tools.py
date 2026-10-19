@@ -199,6 +199,46 @@ async def test_toolset_merge_prefers_later_duplicate_and_routes_execution():
     await merged.executor.close()
 
 
+async def test_toolset_merge_keeps_dynamic_definitions_and_refreshes_routing():
+    """合并必须走 definitions() 公开面：动态工具在加载后立即可见且可执行。"""
+
+    class _LoadingExecutor(_FakeExecutor):
+        def __init__(self) -> None:
+            super().__init__("D", ["load_tools"])
+            self._loaded = False
+
+        def definitions(self) -> list[dict]:
+            return [*super().definitions(), *([_tool_def("loaded")] if self._loaded else [])]
+
+        async def execute(self, name: str, args: dict) -> str:
+            self._loaded = True
+            return await super().execute(name, args)
+
+    class _LiveToolset(Toolset):
+        def definitions(self) -> list[dict]:
+            return self.executor.definitions()
+
+    executor = _LoadingExecutor()
+    dynamic = _LiveToolset(executor=executor, specs=[])
+    static = Toolset(
+        executor=_FakeExecutor("S", ["static"]),
+        specs=[ToolSpec(_tool_def("static"), _allow_resolver)],
+    )
+
+    merged = Toolset.merge([static, dynamic])
+    assert {definition["function"]["name"] for definition in merged.definitions()} == {
+        "static",
+        "load_tools",
+    }
+
+    result = await merged.executor.execute("load_tools", {})
+    assert result == "D:load_tools"
+    assert "loaded" in {
+        definition["function"]["name"] for definition in merged.definitions()
+    }
+    await merged.executor.close()
+
+
 async def test_toolset_merge_with_all_none_returns_empty_toolset():
     """全部 toolset 为 None 时 merge 必须返回空 Toolset 且不抛错。"""
     # Arrange / Act

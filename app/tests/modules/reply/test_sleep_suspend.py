@@ -169,6 +169,7 @@ async def test_wait_during_sleep_checks_at_block_reason(monkeypatch, blocked):
         _ScriptedProvider,
         _make_decision,
         _make_orchestrator,
+        _send_reply_response,
     )
 
     source = MessageQueue()
@@ -186,9 +187,8 @@ async def test_wait_during_sleep_checks_at_block_reason(monkeypatch, blocked):
             "id": "sleep-wait", "type": "function",
             "function": {"name": "wait", "arguments": '{"seconds": 1}'},
         }]},
-        # 收尾必须是一条真实回复：空轮次（无正文且无工具调用）现在会被判定为
-        # 失败并留痕，用它当循环终止符会让本用例去断言一个与本意无关的状态。
-        {"content": "我在", "tool_calls": []},
+        # 收尾必须走 send_reply：agent 模式下正文直发会被判失败。
+        _send_reply_response("我在"),
     ])
     pipeline = _make_orchestrator(provider=provider, group_queue=source)
     pipeline._sleep_service = sleep_service
