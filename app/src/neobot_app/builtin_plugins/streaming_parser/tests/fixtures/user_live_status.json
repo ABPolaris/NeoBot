@@ -1,0 +1,16 @@
+{
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "liveStatus": 1,
+    "roomStatus": 1,
+    "roomid": 21452505,
+    "roundStatus": 0,
+    "broadcast_type": 0,
+    "title": "测试直播间标题",
+    "cover": "https://example.invalid/cover.jpg",
+    "online": 12345,
+    "url": "https://live.bilibili.com/21452505"
+  }
+}

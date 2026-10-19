@@ -14,6 +14,10 @@
 把系统标注渲染进模型自己的历史发言,等于用例子教它「你就该这么说话」——
 模型于是续写聊天记录(`193: AAA大肥鱼: 我是一条鱼`),脏输出再写回历史形成正反馈。
 编号与发送者名字保留在 user 消息上(模型需要用它们指代**别人**)。
+
+**每条 user 消息带粗粒度年龄**(fix(14)):旧消息不再「永远不会过期」。年龄由
+occurred_at 相对**本次快照里最新一条消息**计算,不读墙钟——同一队列快照在任意
+时刻渲染都逐字节一致,稳定前缀缓存不受影响。assistant 行仍然不加任何标注。
 """
 
 from __future__ import annotations
@@ -36,6 +40,30 @@ def _role_for_message(message: Any, bot_account: int) -> str:
     return "user"
 
 
+def _latest_message_epoch(entries: list) -> int | None:
+    """本次快照里最新一条消息的时间：消息年龄的唯一参考点（不读墙钟）。"""
+    times = [
+        entry.occurred_at
+        for entry in entries
+        if entry.kind == QueueEntryType.MESSAGE and entry.occurred_at is not None
+    ]
+    return max(times) if times else None
+
+
+def _format_message_age(occurred_at: int | None, reference: int | None) -> str:
+    """粗粒度年龄（刚刚 / N分钟前 / N小时前 / N天前）；无时间信息时返回空串。"""
+    if occurred_at is None or reference is None:
+        return ""
+    age = max(0, int(reference) - int(occurred_at))
+    if age < 60:
+        return "刚刚"
+    if age < 3600:
+        return f"{age // 60}分钟前"
+    if age < 86400:
+        return f"{age // 3600}小时前"
+    return f"{age // 86400}天前"
+
+
 def _render_role_message(
     *,
     role: str,
@@ -44,6 +72,7 @@ def _render_role_message(
     sender: str,
     content: str,
     replied: bool = False,
+    age: str = "",
 ) -> dict[str, str]:
     """按角色渲染一条聊天记录。
 
@@ -67,7 +96,11 @@ def _render_role_message(
         return {"role": role, "content": body}
     prefix = f"{number}: " if number is not None else ""
     marker = "[被回复消息] " if replied else ""
-    return {"role": role, "content": f"[msg_id={msg_id}] {prefix}{marker}{sender}: {content}"}
+    age_label = f"[{age}] " if age else ""
+    return {
+        "role": role,
+        "content": f"[msg_id={msg_id}] {prefix}{marker}{age_label}{sender}: {content}",
+    }
 
 
 def build_role_messages(
@@ -140,6 +173,9 @@ def _build_from_entries(
     # 发送者标签基于全量上下文计算,保证同一发送者在同一对话中身份恒定
     label_context = entries if label_context_entries is None else label_context_entries
     sender_labels, sender_labels_by_user = queue._build_sender_labels(label_context)
+    # 年龄参考点取上下文里最新的一条消息：同一队列快照无论何时渲染都得到同样的
+    # 字节（缓存安全护栏 A1），也不依赖调用时刻的墙钟。
+    reference_epoch = _latest_message_epoch(label_context)
 
     found_last_reply = False
     if last_reply_message_id is not None:
@@ -190,6 +226,7 @@ def _build_from_entries(
                         sender=sender,
                         content=content,
                         replied=True,
+                        age=_format_message_age(getattr(replied, "time", None), reference_epoch),
                     )
                 )
 
@@ -216,6 +253,7 @@ def _build_from_entries(
                     number=number,
                     sender=sender,
                     content=content,
+                    age=_format_message_age(entry.occurred_at, reference_epoch),
                 )
             )
         elif entry.kind == QueueEntryType.TIMESTAMP:

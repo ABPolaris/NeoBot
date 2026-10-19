@@ -264,14 +264,28 @@ class BrowserManager:
                             pass
                     self._page = None
                     self._session_page = None
+                    self._chrome_pid = None
                     continue
+                # 最后一次失败：清引用后清理孤儿进程，再抛出原异常。
+                self._page = None
+                self._session_page = None
+                self._chrome_pid = None
+                try:
+                    self._kill_orphaned_chrome()
+                except Exception:
+                    pass
                 raise
 
     def _start_sync(self) -> ChromiumPage:
         page = ChromiumPage(addr_or_opts=self._make_options())
+        # DrissionPage 4.x 的 Chromium 对象只有 process_id；旧版才暴露 _process.pid。
+        browser = getattr(page, "browser", None)
+        pid = getattr(browser, "process_id", None)
+        if pid is None:
+            pid = getattr(getattr(browser, "_process", None), "pid", None)
         try:
-            self._chrome_pid = page.browser._process.pid
-        except Exception:
+            self._chrome_pid = int(pid) if pid else None
+        except (TypeError, ValueError):
             self._chrome_pid = None
         return page
 
@@ -349,7 +363,8 @@ class BrowserManager:
                         )
                     except Exception:
                         pass
-            self._chrome_pid = None
+        # pid 重置必须无条件执行：否则 _session_page 为空时旧 pid 会跨 start/close 残留。
+        self._chrome_pid = None
         _unregister_instance(self)
         self._page = None
         self._session_page = None

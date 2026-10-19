@@ -107,6 +107,23 @@ class _ScriptedProvider:
         pass
 
 
+def _send_reply_response(text: str) -> dict:
+    """agent 模式唯一合法的发言路径：模型必须调用 send_reply。"""
+    return {
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call-send-reply",
+                "type": "function",
+                "function": {
+                    "name": "send_reply",
+                    "arguments": json.dumps({"text": text}),
+                },
+            }
+        ],
+    }
+
+
 class _FakeAdapter:
     async def send(self, conversation_ref, payload, wait_response: bool = True):
         return {"status": "ok", "message_id": 2001}
@@ -309,7 +326,7 @@ async def test_current_time_block_is_appended_per_model_call(monkeypatch):
                 "content": "",
                 "tool_calls": [_tool_call("t1", "wait", {"seconds": 1})],
             },
-            {"content": "回复", "tool_calls": []},
+            _send_reply_response("回复"),
         ]
     )
     orch = _make_orchestrator(provider=provider)
@@ -351,7 +368,7 @@ async def test_current_time_block_is_appended_per_model_call(monkeypatch):
 
 async def test_context_block_is_injected_right_after_system(monkeypatch):
     """上下文 user 块必须紧跟在 system 之后、聊天记录之前。"""
-    provider = _ScriptedProvider([{"content": "回复", "tool_calls": []}])
+    provider = _ScriptedProvider([_send_reply_response("回复")])
     orch = _make_orchestrator(provider=provider)
 
     async def _no_suspend(source, snapshot, queue_key):
@@ -378,8 +395,8 @@ async def test_tool_results_compressed_only_on_later_rounds(monkeypatch):
     """工具输出压缩只在"重新构建/续用提示词"的后续轮次开始前触发一次。"""
     provider = _ScriptedProvider(
         [
-            {"content": "第一轮", "tool_calls": []},
-            {"content": "第二轮", "tool_calls": []},
+            _send_reply_response("第一轮"),
+            _send_reply_response("第二轮"),
         ]
     )
 
@@ -428,7 +445,7 @@ async def test_flow_registry_receives_prompt_request_and_state(monkeypatch):
     from neobot_app.reply.flow_registry import ChatFlowRegistry
 
     registry = ChatFlowRegistry()
-    provider = _ScriptedProvider([{"content": "回复", "tool_calls": []}])
+    provider = _ScriptedProvider([_send_reply_response("回复")])
     orch = _make_orchestrator(provider=provider, flow_registry=registry)
 
     async def _no_suspend(source, snapshot, queue_key):
@@ -458,7 +475,7 @@ async def test_flow_registry_receives_prompt_request_and_state(monkeypatch):
 
 async def test_flow_recording_is_optional(monkeypatch):
     """未注入登记处时（默认装配之外）不得影响回复管线。"""
-    provider = _ScriptedProvider([{"content": "回复", "tool_calls": []}])
+    provider = _ScriptedProvider([_send_reply_response("回复")])
     orch = _make_orchestrator(provider=provider)
 
     async def _no_suspend(source, snapshot, queue_key):
@@ -502,7 +519,7 @@ async def _run_once(orch, monkeypatch, *, queue_key: str = "123456"):
 
 async def test_native_vision_note_is_part_of_system_prompt(monkeypatch):
     """原生视觉说明必须追加在 system 提示词里,而不是对话末尾的 user 消息。"""
-    provider = _VisionProvider([{"content": "回复", "tool_calls": []}])
+    provider = _VisionProvider([_send_reply_response("回复")])
     orch = _make_orchestrator(provider=provider)
 
     event = await _run_once(orch, monkeypatch)
@@ -518,7 +535,7 @@ async def test_native_vision_note_is_part_of_system_prompt(monkeypatch):
 
 async def test_native_vision_note_absent_without_native_vision(monkeypatch):
     """不支持原生视觉的 provider 不应该多出这段 token。"""
-    provider = _ScriptedProvider([{"content": "回复", "tool_calls": []}])
+    provider = _ScriptedProvider([_send_reply_response("回复")])
     orch = _make_orchestrator(provider=provider)
 
     event = await _run_once(orch, monkeypatch)
@@ -537,7 +554,7 @@ async def test_native_vision_note_can_be_disabled(tmp_path, monkeypatch):
     custom = tmp_path / "prompts" / "custom" / "prompts.toml"
     custom.write_text("[native_vision]\nenabled = false\n", encoding="utf-8")
 
-    provider = _VisionProvider([{"content": "回复", "tool_calls": []}])
+    provider = _VisionProvider([_send_reply_response("回复")])
     orch = _make_orchestrator(
         provider=provider, prompt_store=PromptStore(tmp_path)
     )
@@ -560,7 +577,7 @@ async def test_native_vision_note_can_be_customized(tmp_path, monkeypatch):
         '[native_vision]\ntemplate = "自定义视觉说明"\n', encoding="utf-8"
     )
 
-    provider = _VisionProvider([{"content": "回复", "tool_calls": []}])
+    provider = _VisionProvider([_send_reply_response("回复")])
     orch = _make_orchestrator(
         provider=provider, prompt_store=PromptStore(tmp_path)
     )

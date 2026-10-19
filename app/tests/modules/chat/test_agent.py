@@ -97,6 +97,54 @@ class _DenyExecutor:
         return None
 
 
+class _LoadingExecutor:
+    """第一次调用后动态多出一个工具的假执行器（模拟 skills__load_tools）。"""
+
+    def __init__(self) -> None:
+        self.loaded = False
+        self.calls: list[str] = []
+
+    def definitions(self) -> list[dict]:
+        tools = [_tool_def("load_tools")]
+        if self.loaded:
+            tools.append(_tool_def("loaded_tool"))
+        return tools
+
+    async def execute(self, name: str, args: dict) -> str:
+        self.calls.append(name)
+        self.loaded = True
+        return "ok"
+
+    async def close(self) -> None:
+        return None
+
+
+class _LiveToolset(Toolset):
+    """definitions() 每次从执行器重算的工具集（同 LiveToolset 契约）。"""
+
+    def definitions(self) -> list[dict]:
+        return self.executor.definitions()
+
+
+class _ToolRecordingProvider(FakeProvider):
+    """记录每次请求实际携带的工具列表。"""
+
+    def __init__(self, responses: list[Any]) -> None:
+        super().__init__(responses)
+        self.tool_lists: list[list[dict] | None] = []
+
+    async def chat(self, messages: list[dict], tools=None) -> dict:
+        self.tool_lists.append(tools)
+        return await super().chat(messages, tools)
+
+
+def _tool_def(name: str) -> dict:
+    return {
+        "type": "function",
+        "function": {"name": name, "parameters": {"type": "object"}},
+    }
+
+
 def _allow_resolver(args: dict, context: ToolGuardContext, policy: ToolAccessPolicy):
     return policy.default_rule
 
@@ -265,6 +313,36 @@ async def test_invoke_denies_policy_denied_tool_without_execution(tmp_path: Path
         assert state["messages"][-1]["content"] == "fine"
     finally:
         await agent.close()
+
+
+async def test_merged_live_toolset_is_exposed_and_refreshed_after_tool_use(tmp_path: Path):
+    """Agent.merge 必须保留动态 definitions：首轮可见，加载后下一轮立即生效。"""
+    executor = _LoadingExecutor()
+    toolset = _LiveToolset(executor=executor, specs=[])
+    provider = _ToolRecordingProvider(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_tool_call("call_1", "load_tools", "{}")],
+            },
+            {"role": "assistant", "content": "done"},
+        ]
+    )
+    agent = Agent(
+        provider, cwd=tmp_path, toolset=toolset, include_builtin_tools=False,
+        max_iterations=5,
+    )
+    try:
+        await agent.invoke({"messages": [{"role": "user", "content": "load"}]})
+    finally:
+        await agent.close()
+
+    first = {tool["function"]["name"] for tool in provider.tool_lists[0] or []}
+    second = {tool["function"]["name"] for tool in provider.tool_lists[1] or []}
+    assert first == {"load_tools"}
+    assert second == {"load_tools", "loaded_tool"}
+    assert executor.calls == ["load_tools"]
 
 
 async def test_invoke_reports_unknown_tool_error_in_messages(tmp_path: Path):

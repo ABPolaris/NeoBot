@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=720">
+{{font_style}}
+<style>
+  /* ===== 樱花粉风格开播/下播卡片（原创，纯 CSS 绘制） ===== */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; width: 720px; background-color: #fff6fa; }
+  body {
+    font-family: "FusionPixel", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  .card {
+    position: relative;
+    width: 720px;
+    overflow: hidden;
+    padding: 26px 26px 24px;
+    background-color: #fff6fa;
+    background-image:
+      radial-gradient(720px 420px at 90% -14%, #ffe1ed 0%, rgba(255,225,237,0) 64%),
+      radial-gradient(560px 360px at -8% 106%, #ffe9f2 0%, rgba(255,233,242,0) 62%),
+      linear-gradient(180deg, #fffdfe 0%, #fff6fa 100%);
+  }
+
+  /* 樱花花瓣：用 border-radius 0 100% 0 100% 画出的花瓣形状，从四角出血 */
+  .petal { position: absolute; border-radius: 0 100% 0 100%; pointer-events: none; }
+  .petal-1 { width: 130px; height: 130px; top: -38px; right: -30px; transform: rotate(-22deg);
+             background: linear-gradient(150deg, #ffcfe0, #fff1f6); opacity: .72; }
+  .petal-2 { width: 84px;  height: 84px;  top: 44px;  right: -44px; transform: rotate(26deg);
+             background: linear-gradient(150deg, #ffd9e7, #fff4f8); opacity: .5; }
+  .petal-3 { width: 116px; height: 116px; bottom: -42px; left: -34px; transform: rotate(-6deg);
+             background: linear-gradient(150deg, #ffd4e3, #fff2f7); opacity: .68; }
+  .petal-4 { width: 56px;  height: 56px;  bottom: 72px; left: -24px; transform: rotate(38deg);
+             background: linear-gradient(150deg, #ffe0eb, #fff6fa); opacity: .55; }
+
+  .inner {
+    position: relative;
+    background: #ffffff;
+    border: 1px solid rgba(251, 114, 153, .13);
+    border-radius: 26px;
+    padding: 20px 20px 18px;
+    box-shadow: 0 20px 44px rgba(251, 114, 153, .16), 0 2px 6px rgba(251, 114, 153, .07);
+  }
+
+  /* 顶栏：右上角品牌小字 */
+  .topbar { display: flex; align-items: center; justify-content: flex-end; margin-bottom: 14px; }
+  .brand {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; font-weight: 600; letter-spacing: .13em;
+    text-transform: uppercase; color: #fb7299;
+  }
+  .brand::before {
+    content: ""; width: 8px; height: 8px; border-radius: 50%;
+    background: linear-gradient(135deg, #fb7299, #ffa8c6);
+    box-shadow: 0 0 0 3px rgba(251, 114, 153, .16);
+  }
+
+  /* 封面 16:9 */
+  .cover-wrap {
+    position: relative; width: 100%; padding-top: 56.25%;
+    border-radius: 18px; overflow: hidden;
+    background: linear-gradient(135deg, #ffd9e5, #fff0f6);
+  }
+  .cover { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cover-shade {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background: linear-gradient(180deg, rgba(38, 8, 22, 0) 44%, rgba(38, 8, 22, .52) 100%);
+  }
+  .status {
+    position: absolute; left: 14px; bottom: 14px;
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 8px 17px; border-radius: 999px;
+    font-size: 16px; font-weight: 700; letter-spacing: .04em; color: #ffffff;
+    background: linear-gradient(135deg, #fb7299 0%, #ff9bbc 100%);
+    box-shadow: 0 8px 20px rgba(251, 114, 153, .45);
+  }
+  .status::before {
+    content: ""; width: 7px; height: 7px; border-radius: 50%;
+    background: #ffffff; box-shadow: 0 0 0 3px rgba(255, 255, 255, .34);
+  }
+
+  /* 主播信息 */
+  .profile { display: flex; align-items: flex-start; gap: 16px; margin-top: 18px; }
+  .avatar {
+    flex: 0 0 auto; width: 96px; height: 96px;
+    border-radius: 50%; object-fit: cover; display: block;
+    border: 3px solid #ffffff;
+    box-shadow: 0 0 0 3px rgba(251, 114, 153, .85), 0 10px 22px rgba(251, 114, 153, .26);
+    background: linear-gradient(135deg, #ffd9e5, #fff0f6);
+  }
+  .who { flex: 1 1 auto; min-width: 0; padding-top: 2px; }
+  .name {
+    font-size: 25px; line-height: 1.25; font-weight: 700; color: #2a2027;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .title {
+    margin-top: 7px;
+    font-size: 16px; line-height: 1.5; color: #6d6270;
+    overflow-wrap: anywhere; word-break: break-word;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; max-height: 48px;
+  }
+
+  /* 分区 / 人气 */
+  .meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 17px; }
+  .tag {
+    display: inline-flex; align-items: center; padding: 5px 13px; border-radius: 999px;
+    font-size: 13px; font-weight: 600; color: #e0507f;
+    background: #fff0f6; border: 1px solid rgba(251, 114, 153, .22);
+  }
+  .stat {
+    display: inline-flex; align-items: center; gap: 7px; padding: 5px 13px; border-radius: 999px;
+    font-size: 13px; color: #8a7f8d; background: #faf6f8; border: 1px solid rgba(42, 32, 39, .05);
+  }
+  .stat::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #fb7299; }
+  .tag:empty, .stat:empty { display: none; }
+
+  /* 开播时间：空字符串时整块隐藏，不留空白 */
+  .live-time {
+    position: relative; display: inline-flex; align-items: center;
+    margin-top: 13px; padding: 8px 15px 8px 36px; border-radius: 12px;
+    font-size: 14px; font-weight: 600; color: #c2436f;
+    background: linear-gradient(135deg, #fff2f7, #ffe7f0);
+    border: 1px dashed rgba(251, 114, 153, .42);
+  }
+  .live-time::before {
+    content: ""; position: absolute; left: 14px; top: 50%; width: 14px; height: 14px;
+    margin-top: -7px; border: 2px solid #fb7299; border-radius: 50%;
+  }
+  .live-time::after {
+    content: ""; position: absolute; left: 20px; top: 50%; width: 2px; height: 5px;
+    margin-top: -5px; background: #fb7299; border-radius: 1px;
+  }
+  .live-time:empty { display: none; }
+
+  /* 底部房间号 */
+  .foot {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 16px; padding-top: 13px; border-top: 1px solid #f5e8ee;
+  }
+  .room { font-size: 12px; letter-spacing: .06em; color: #ab9ba4; }
+  .room:empty { display: none; }
+  .mark { display: inline-flex; align-items: center; gap: 5px; }
+  .mark i { display: block; width: 3px; border-radius: 2px; background: #ffd0e0; }
+  .mark i:nth-child(1) { height: 6px; }
+  .mark i:nth-child(2) { height: 10px; }
+  .mark i:nth-child(3) { height: 14px; background: #fb7299; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <span class="petal petal-1"></span>
+    <span class="petal petal-2"></span>
+    <span class="petal petal-3"></span>
+    <span class="petal petal-4"></span>
+
+    <div class="inner">
+      <div class="topbar">
+        <span class="brand">{{host_label}}</span>
+      </div>
+
+      <div class="cover-wrap">
+        <img class="cover" src="{{cover_src}}" alt="">
+        <span class="cover-shade"></span>
+        <span class="status">{{status_text}}</span>
+      </div>
+
+      <div class="profile">
+        <img class="avatar" src="{{avatar_src}}" alt="">
+        <div class="who">
+          <div class="name">{{name}}</div>
+          <div class="title">{{title}}</div>
+        </div>
+      </div>
+
+      <div class="meta"><span class="tag">{{area_name}}</span><span class="stat">{{online_text}}</span></div>
+
+      <div class="live-time">{{live_time_text}}</div>
+
+      <div class="foot">
+        <span class="room">{{room_id}}</span>
+        <span class="mark"><i></i><i></i><i></i></span>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

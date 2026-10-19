@@ -1,0 +1,13 @@
+{
+  "code": 0,
+  "message": "0",
+  "data": {
+    "liveStatus": 0,
+    "roomStatus": 0,
+    "roomid": 0,
+    "title": "",
+    "cover": "",
+    "online": 0,
+    "url": ""
+  }
+}

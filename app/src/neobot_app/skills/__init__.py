@@ -10,6 +10,7 @@ from neobot_app.skills.user_profile import UserProfileSkill
 from neobot_app.skills.favorability import FavorabilitySkill
 from neobot_app.skills.chat_history import ChatHistorySkill
 from neobot_app.skills.group_management import GroupManagementSkill
+from neobot_app.skills.onebot_skill import OneBotSkill
 from neobot_app.skills.friend_management import FriendManagementSkill
 from neobot_app.skills.forward_message import ForwardMessageSkill
 from neobot_app.skills.sticker_skill import StickerSkill
@@ -198,6 +199,11 @@ def build_all_skills(
                 adapter=adapter,
                 credential_manager=credential_manager,
             )
+        )
+
+    if "onebot" not in disabled and adapter is not None:
+        skills_to_register.append(
+            OneBotSkill(adapter=adapter, credential_manager=credential_manager)
         )
 
     if "friend_management" not in disabled:

@@ -997,6 +997,8 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
     if command_service is not None:
         # 软重启会重建浏览器实例：截图端口必须跟着换，否则 /help 会打到旧实例
         command_service.set_screenshots(browser["screenshots"])
+    # 管理员卡片只画头像、不列 QQ 号：把 AvatarStore 接进命令服务（issue #85）
+    command_service.set_avatar_store(avatar_store)
 
     # ── 凭据管理器(风险操作授权:踢人/退群需超级管理员凭据) ──
     credential_manager = build_credential_manager(
@@ -1051,6 +1053,50 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
         agent_provider=provider,
     )
     plugin["host_facade"]._set_skills(skill_manager)
+
+    # ── B站 + 外部 ASR（默认开启；B站无登录态时服务休眠，等同关闭）──
+    asr_service = None
+    bili_runtime = None
+    try:
+        from neobot_app.audio.asr import build_asr_service
+        from neobot_app.bilibili.runtime import BilibiliRuntime, build_bilibili_skills
+
+        asr_service = build_asr_service(
+            config, logger=logger_factory.get_logger("app.asr")
+        )
+        bili_runtime = BilibiliRuntime(
+            config=config,
+            provider=provider,
+            archive_service=memory_svcs["archive_memory_service"],
+            uow_factory=uow_factory,
+            command_service=command_service,
+            logger=logger_factory.get_logger("app.bilibili"),
+            bot_name=config.bot.nick_name,
+            bot_data=config.bot.bot_data,
+        )
+        if command_service is not None:
+            bili_runtime.register_commands(command_service)
+        for _skill in build_bilibili_skills(
+            archive_service=memory_svcs["archive_memory_service"],
+            uow_factory=uow_factory,
+            runtime=bili_runtime,
+        ):
+            try:
+                skill_manager.register(_skill)
+            except Exception:
+                logger_factory.get_logger("app.bilibili").exception(
+                    f"B站技能注册失败：{getattr(_skill, 'name', _skill)}"
+                )
+        _cross_chat = skill_manager.get("cross_chat")
+        if _cross_chat is not None and callable(
+            getattr(_cross_chat, "set_bilibili_channel", None)
+        ):
+            _cross_chat.set_bilibili_channel(bili_runtime.channel)
+    except Exception:
+        logger_factory.get_logger("app.bilibili").exception(
+            "B站/ASR 装配失败，相关功能降级为关闭"
+        )
+
 
     plugin_runtime = _reuse_or(
         "plugin_runtime",
@@ -1363,6 +1409,8 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
     # ── 沙箱维护 Agent（独立 AI 循环，不经过聊天流）──
     admin_accounts = getattr(getattr(config, "chat", None), "admin_accounts", None) or []
     maintenance_coros = []
+    if bili_runtime is not None:
+        maintenance_coros.append(bili_runtime.run())
     # 睡眠剩余时间播报：睡眠期间每分钟打印剩余时间（仅日志，不回复）
     maintenance_coros.append(sleep_service.ticker())
     # /help 预渲染缓存（spec(5) §4.2 / R9）：后台异步、不阻塞启动；
@@ -1645,6 +1693,11 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
             "vision_detect_service": (vision_detect_service, "本地视觉检测服务"),
             "vision_provider": (vision_provider, "视觉模型 Provider"),
             "provider": (provider, "主模型 Provider"),
+            "bilibili_service": (
+                bili_runtime.service if bili_runtime is not None else None,
+                "B站服务（登录/动态/轮询）",
+            ),
+            "asr_service": (asr_service, "外部 ASR 服务（硅基流动）"),
             "command_service": (command_service, "命令服务"),
             "credential_manager": (credential_manager, "凭据管理器"),
             "sleep_service": (sleep_service, "睡眠服务"),

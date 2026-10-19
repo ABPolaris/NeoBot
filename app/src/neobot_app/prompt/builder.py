@@ -259,7 +259,19 @@ class PromptBuilder:
             if long_task_progress:
                 prompt = _merge_prompt_fragments(prompt, long_task_progress)
 
+        prompt = self._append_style_sections(prompt, values)
         return self._append_adaptive(prompt)
+
+
+    def _append_style_sections(self, prompt: str, values: dict) -> str:
+        """合并活人感/旧消息等追加型提示分区（默认开启，可用 enabled=false 关闭）。"""
+        for key in ("human_feel", "stale_topic"):
+            if not self._section_enabled(key):
+                continue
+            block = render_template(self._template(key), values)
+            if block:
+                prompt = _merge_prompt_fragments(prompt, block)
+        return prompt
 
     def _context_values(
         self,
@@ -372,6 +384,7 @@ class PromptBuilder:
             if long_task_progress:
                 prompt = _merge_prompt_fragments(prompt, long_task_progress)
 
+        prompt = self._append_style_sections(prompt, values)
         return self._append_adaptive(prompt)
 
     # ── 聊天记录 ──

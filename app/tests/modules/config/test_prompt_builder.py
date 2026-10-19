@@ -677,3 +677,55 @@ def test_build_short_time_message_can_be_disabled(tmp_path):
     # 完整时间块不受影响
     assert builder.build_current_time_message() is not None
 
+
+# ── 活人感增强 / 旧消息处理（修复：用户拍板的两个追加型提示分区） ──────────────
+
+HUMAN_FEEL_MARKER = "<活人感增强>"
+STALE_TOPIC_MARKER = "<旧消息处理>"
+
+
+def test_human_feel_and_stale_topic_are_enabled_by_default_and_documented(tmp_path):
+    """两个分区必须存在、默认启用、与用户原话一致且无占位符。"""
+    store = _default_store(tmp_path)
+
+    human_feel = store.template("human_feel")
+    assert store.enabled("human_feel") is True
+    for banned in ("调调", "够狠的", "xx归xx，但xxx", "好歹xx"):
+        assert banned in human_feel, banned
+    assert "禁止插话" in human_feel
+    assert "严禁任何形式的不懂装懂" in human_feel
+    assert template_placeholders(human_feel) == set()
+
+    stale_topic = store.template("stale_topic")
+    assert store.enabled("stale_topic") is True
+    assert "对于一段时间之前的消息，你不应该继续回复" in stale_topic
+    assert "先道歉刚刚没有注意到" in stale_topic
+    assert template_placeholders(stale_topic) == set()
+
+
+async def test_style_sections_appended_to_group_and_friend_system_prompts():
+    """追加逻辑在 builder 里：自定义 [group_chat]/[friend_chat] 整段覆盖也生效。"""
+    builder = _make_builder("你好{bot_name}")
+
+    group_prompt = await builder.build_group_chat_prompt(123456, _FakeQueue())
+    friend_prompt = await builder.build_friend_chat_prompt(10086, _FakeQueue())
+
+    for prompt in (group_prompt, friend_prompt):
+        assert HUMAN_FEEL_MARKER in prompt
+        assert STALE_TOPIC_MARKER in prompt
+        assert prompt.index(HUMAN_FEEL_MARKER) > prompt.index("你好小测试")
+
+
+async def test_style_sections_can_be_disabled(tmp_path):
+    sync_default_prompts(tmp_path)
+    store = _write_custom(
+        tmp_path, "[human_feel]\nenabled = false\n[stale_topic]\nenabled = false\n"
+    )
+    builder = PromptBuilder(BotConfig(), _FakeProfileService(), prompt_store=store)
+
+    group_prompt = await builder.build_group_chat_prompt(123456, _FakeQueue())
+    friend_prompt = await builder.build_friend_chat_prompt(10086, _FakeQueue())
+
+    for prompt in (group_prompt, friend_prompt):
+        assert HUMAN_FEEL_MARKER not in prompt
+        assert STALE_TOPIC_MARKER not in prompt

@@ -1,0 +1,55 @@
+# NeoBot 插件清单：neobot_modloader 在启动时扫描插件目录读取本文件。
+# 字段语义见 NeoBot 仓库 packages/modloader/src/neobot_modloader/loading/manifest.py。
+name = "streaming_parser"
+version = "0.3.1"
+description = "流媒体平台解析：B 站直播间监听、开播/下播推送与卡片渲染（amagi 协议的纯 Python 实现）"
+author = "SuperQuail"
+license = "MIT"
+homepage = "https://github.com/SuperQuail/NeoBot_StreamingParser"
+repo = "https://github.com/SuperQuail/NeoBot_StreamingParser"
+branch = "main"
+tags = ["bilibili", "live", "parser", "notify"]
+
+# 插件间依赖，空表示不依赖任何其他插件（网页面板接入留待后续版本）。
+dependencies = []
+priority = 0
+
+# PyPI 依赖：全部走本体已装的 httpx / pydantic / sqlalchemy，不额外引入。
+python_dependencies = []
+
+# 插件本体可热重载；配置改动需要重启或重载插件才生效。
+hot_reload = true
+config_hot_reload = false
+
+# 下面每一项的注释会作为面板配置表单的字段说明。
+[config]
+# 轮询间隔（秒）；开播检测的延迟上限基本等于该值，最小 15。
+poll_interval_seconds = 60
+# 单次 HTTP 请求超时（秒）。
+request_timeout = 10.0
+# B 站 Cookie 串，例如 "SESSDATA=xxx; bili_jct=yyy"；留空表示匿名请求。
+cookie = ""
+# 自定义 User-Agent；留空则使用内置默认 UA。
+user_agent = ""
+# 同时轮询的房间数上限。
+poll_concurrency = 4
+# 默认卡片风格：random 表示每次随机挑一个，也可写死 sakura / neon / minimal。
+default_card_style = "random"
+# 新订阅的直播间默认是否推送开播。
+default_push_live = true
+# 新订阅的直播间默认是否推送下播。默认开：/监听 一个直播间就同时建好开播与下播推送。
+default_push_live_end = true
+# 默认是否在推送开播卡片后再触发一次 AI 回复。
+default_ai_reply_live = true
+# 默认是否在推送下播卡片后再触发一次 AI 回复。
+default_ai_reply_live_end = false
+# 开播状态总览图最多显示多少个主播。
+overview_max_hosts = 30
+# 头像/封面本地缓存保留天数。
+asset_cache_days = 14
+# 卡片渲染超时（秒）。
+render_timeout = 30.0
+# 卡片渲染缩放倍数，2 表示 2x 高清。
+render_scale = 2.0
+# 是否在开播通知里 @全体成员。
+mention_all_on_live = false

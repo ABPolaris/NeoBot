@@ -175,3 +175,144 @@ def test_vision_context_is_run_local():
     append_image_context(first, [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}])
     append_image_context(second, [])
     assert first and not second
+
+
+# ── fix(16):默认图与 add_image 统一发送者标注/坐标 ──────────────────
+
+def _sender_queue(*, nicknames):
+    """真实 MessageQueue：每 nickname 一条只带图片段的消息。"""
+    from neobot_adapter.model.basic import PostMessageMessagesender
+    from neobot_adapter.model.message import GroupMessage, MessageSegment
+    from neobot_app.message.queue import MessageQueue
+
+    queue = MessageQueue(timestamp_interval_seconds=10**9)
+    for index, (nickname, user_id) in enumerate(nicknames):
+        queue.push(
+            "1",
+            GroupMessage(
+                message_id=101 + index,
+                user_id=user_id,
+                group_id=1,
+                message=[MessageSegment(type="image", data={"file": "a.png"})],
+                sender=PostMessageMessagesender(user_id=user_id, nickname=nickname),
+            ),
+            occurred_at=1_700_000_000 + index,
+        )
+    return queue
+
+
+async def test_default_image_labels_carry_sender_with_duplicate_disambiguation():
+    from neobot_app.reply.vision_context import ReplyVisionContext
+
+    queue = _sender_queue(nicknames=[("小明", 10001), ("小明", 10002)])
+    numbering = SimpleNamespace(mapping={1: 101, 2: 102})
+
+    async def execute(name, args):
+        from neobot_app.skills.image_context_skill import ImageContextResult
+
+        return ImageContextResult(
+            '{"ok": true}',
+            [{"type": "image_url", "image_url": {"url": f"img-{args['msg_number']}"}}],
+        )
+
+    context = ReplyVisionContext()
+    await context.refresh_defaults(
+        queue=queue, queue_key="1", numbering=numbering,
+        loader=SimpleNamespace(execute=execute), pipeline_key="group:1", max_images=2,
+    )
+    parts = context.request_messages([])[-1]["content"]
+    texts = [part["text"] for part in parts if part["type"] == "text"]
+
+    assert any(
+        "发送者：小明(10001)" in text and "正文消息编号 1" in text for text in texts
+    ), texts
+    assert any(
+        "发送者：小明(10002)" in text and "正文消息编号 2" in text for text in texts
+    ), texts
+
+
+async def test_default_image_sender_is_escaped_for_multiline_nickname():
+    from neobot_app.reply.vision_context import ReplyVisionContext
+
+    queue = _sender_queue(nicknames=[("小\n明<x>", 10001)])
+    numbering = SimpleNamespace(mapping={1: 101})
+
+    async def execute(name, args):
+        from neobot_app.skills.image_context_skill import ImageContextResult
+
+        return ImageContextResult('{"ok": true}', [{"type": "image_url", "image_url": {"url": "x"}}])
+
+    context = ReplyVisionContext()
+    await context.refresh_defaults(
+        queue=queue, queue_key="1", numbering=numbering,
+        loader=SimpleNamespace(execute=execute), pipeline_key="group:1", max_images=1,
+    )
+    texts = [
+        part["text"]
+        for part in context.request_messages([])[-1]["content"]
+        if part["type"] == "text"
+    ]
+
+    assert any("发送者：小 明＜x＞" in text for text in texts), texts
+    assert all("\n" not in text for text in texts)
+
+
+async def test_failed_default_image_placeholder_keeps_sender():
+    from neobot_app.reply.vision_context import ReplyVisionContext
+    from neobot_app.skills.image_context_skill import ImageContextResult
+
+    queue = _sender_queue(nicknames=[("小明", 10001)])
+    failure = ImageContextResult('{"ok": false, "error": "加载失败"}', [])
+    context = ReplyVisionContext()
+    await context.refresh_defaults(
+        queue=queue, queue_key="1", numbering=SimpleNamespace(mapping={1: 101}),
+        loader=SimpleNamespace(execute=AsyncMock(return_value=failure)),
+        pipeline_key="group:1", max_images=1,
+    )
+    texts = [
+        part["text"]
+        for part in context.request_messages([])[-1]["content"]
+        if part["type"] == "text"
+    ]
+
+    assert any("发送者：小明" in text and "加载失败" in text for text in texts), texts
+
+
+def test_tool_images_use_the_same_sender_and_coordinate_system():
+    import json as _json
+
+    from neobot_app.reply.vision_context import labelled_tool_images
+    from neobot_app.skills.image_context_skill import ImageContextResult
+
+    result = ImageContextResult(
+        _json.dumps({
+            "ok": True,
+            "images": [{
+                "sender": "小明", "msg_number": 3, "message_id": 42,
+                "image_index": 1, "label": "旧标签",
+            }],
+        }),
+        [{"type": "image_url", "image_url": {"url": "x"}}],
+    )
+
+    text = labelled_tool_images(result, tool_call_id="call-1")[0]["text"]
+
+    assert "发送者：小明" in text
+    assert "正文消息编号 3" in text
+    assert "消息ID 42" in text
+    assert "图片序号 2" in text
+    assert "第 1 张" not in text
+
+
+def test_tool_images_without_coordinates_fall_back_to_ordinal():
+    from neobot_app.reply.vision_context import labelled_tool_images
+    from neobot_app.skills.image_context_skill import ImageContextResult
+
+    result = ImageContextResult(
+        '{"ok": true, "images": [{"index": 0}]}',
+        [{"type": "image_url", "image_url": {"url": "x"}}],
+    )
+
+    text = labelled_tool_images(result)[0]["text"]
+
+    assert "第 1 张" in text

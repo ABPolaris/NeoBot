@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=720">
+{{font_style}}
+<style>
+  /* ===== 霓虹暗色风格开播/下播卡片（原创，纯 CSS 绘制） ===== */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; width: 720px; background-color: #0d0b1c; }
+  body {
+    font-family: "FusionPixel", "Rajdhani", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .card {
+    position: relative;
+    width: 720px;
+    overflow: hidden;
+    padding: 26px 26px 24px;
+    background-color: #0d0b1c;
+    background-image:
+      radial-gradient(620px 400px at 88% -12%, rgba(34, 225, 255, .20) 0%, rgba(34, 225, 255, 0) 62%),
+      radial-gradient(560px 400px at -6% 108%, rgba(164, 107, 255, .22) 0%, rgba(164, 107, 255, 0) 62%),
+      linear-gradient(180deg, #0a0e1a 0%, #0d0b1c 100%);
+  }
+  /* 网格底纹 */
+  .card::before {
+    content: ""; position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background-image:
+      linear-gradient(rgba(120, 200, 255, .055) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(120, 200, 255, .055) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+  }
+  /* 顶部霓虹扫描线 */
+  .card::after {
+    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, rgba(34, 225, 255, 0) 0%, #22e1ff 32%, #a46bff 68%, rgba(164, 107, 255, 0) 100%);
+    pointer-events: none;
+  }
+
+  .inner {
+    position: relative;
+    background: linear-gradient(180deg, rgba(20, 26, 46, .92) 0%, rgba(15, 16, 32, .94) 100%);
+    border: 1px solid rgba(34, 225, 255, .30);
+    border-radius: 20px;
+    padding: 20px 20px 18px;
+    box-shadow:
+      0 0 0 1px rgba(164, 107, 255, .16),
+      0 0 32px rgba(34, 225, 255, .16),
+      0 0 70px rgba(164, 107, 255, .12),
+      inset 0 1px 0 rgba(180, 235, 255, .10);
+  }
+
+  .topbar { display: flex; align-items: center; justify-content: flex-end; margin-bottom: 14px; }
+  .brand {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12px; font-weight: 700; letter-spacing: .2em;
+    text-transform: uppercase;
+    color: #9de9ff;
+    text-shadow: 0 0 10px rgba(34, 225, 255, .75);
+  }
+  .brand::before {
+    content: ""; width: 8px; height: 8px; border-radius: 50%;
+    background: #22e1ff;
+    box-shadow: 0 0 8px #22e1ff, 0 0 18px rgba(34, 225, 255, .8);
+  }
+
+  /* 封面 16:9 */
+  .cover-wrap {
+    position: relative; width: 100%; padding-top: 56.25%;
+    border-radius: 14px; overflow: hidden;
+    background: linear-gradient(135deg, #131a30, #1b1330);
+    box-shadow: 0 0 0 1px rgba(34, 225, 255, .22), 0 0 26px rgba(34, 225, 255, .14);
+  }
+  .cover { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cover-shade {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background: linear-gradient(180deg, rgba(6, 8, 18, .10) 40%, rgba(6, 8, 18, .82) 100%);
+  }
+  .status {
+    position: absolute; left: 14px; bottom: 14px;
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 8px 18px; border-radius: 8px;
+    font-size: 16px; font-weight: 700; letter-spacing: .12em; color: #ffffff;
+    background: linear-gradient(135deg, rgba(251, 114, 153, .96) 0%, rgba(164, 107, 255, .96) 100%);
+    box-shadow: 0 0 18px rgba(251, 114, 153, .55), 0 0 34px rgba(164, 107, 255, .45);
+  }
+  .status::before {
+    content: ""; width: 7px; height: 7px; border-radius: 50%;
+    background: #ffffff; box-shadow: 0 0 10px rgba(255, 255, 255, .95);
+  }
+
+  .profile { display: flex; align-items: flex-start; gap: 16px; margin-top: 20px; }
+  .avatar {
+    flex: 0 0 auto; width: 96px; height: 96px;
+    border-radius: 50%; object-fit: cover; display: block;
+    border: 2px solid rgba(34, 225, 255, .65);
+    box-shadow: 0 0 16px rgba(34, 225, 255, .55), 0 0 34px rgba(164, 107, 255, .38);
+    background: linear-gradient(135deg, #16203a, #241a3d);
+  }
+  .who { flex: 1 1 auto; min-width: 0; padding-top: 4px; }
+  .name {
+    font-size: 26px; line-height: 1.25; font-weight: 700; letter-spacing: .02em;
+    color: #eaf7ff;
+    text-shadow: 0 0 14px rgba(34, 225, 255, .55), 0 0 34px rgba(34, 225, 255, .28);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .title {
+    margin-top: 8px;
+    font-size: 15px; line-height: 1.55; color: #9fb2cf;
+    overflow-wrap: anywhere; word-break: break-word;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; max-height: 47px;
+  }
+
+  .meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+  .tag {
+    display: inline-flex; align-items: center; padding: 5px 13px; border-radius: 6px;
+    font-size: 13px; font-weight: 600; letter-spacing: .04em; color: #7ef0ff;
+    background: rgba(34, 225, 255, .10);
+    border: 1px solid rgba(34, 225, 255, .48);
+    box-shadow: 0 0 12px rgba(34, 225, 255, .22), inset 0 0 12px rgba(34, 225, 255, .10);
+  }
+  .stat {
+    display: inline-flex; align-items: center; gap: 7px; padding: 5px 13px; border-radius: 6px;
+    font-size: 13px; letter-spacing: .04em; color: #b9a6ff;
+    background: rgba(164, 107, 255, .10);
+    border: 1px solid rgba(164, 107, 255, .42);
+    box-shadow: 0 0 12px rgba(164, 107, 255, .20);
+  }
+  .stat::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #a46bff; box-shadow: 0 0 8px #a46bff; }
+  .tag:empty, .stat:empty { display: none; }
+
+  /* 开播时间：空字符串时整块隐藏，不留空白 */
+  .live-time {
+    position: relative; display: inline-flex; align-items: center;
+    margin-top: 14px; padding: 8px 16px 8px 38px; border-radius: 8px;
+    font-size: 14px; font-weight: 600; letter-spacing: .04em; color: #8ef4ff;
+    background: linear-gradient(135deg, rgba(34, 225, 255, .12), rgba(164, 107, 255, .12));
+    border: 1px solid rgba(34, 225, 255, .38);
+    box-shadow: 0 0 16px rgba(34, 225, 255, .18);
+  }
+  .live-time::before {
+    content: ""; position: absolute; left: 15px; top: 50%; width: 14px; height: 14px;
+    margin-top: -7px; border: 2px solid #22e1ff; border-radius: 50%;
+    box-shadow: 0 0 8px rgba(34, 225, 255, .8);
+  }
+  .live-time::after {
+    content: ""; position: absolute; left: 21px; top: 50%; width: 2px; height: 5px;
+    margin-top: -5px; background: #22e1ff; border-radius: 1px;
+    box-shadow: 0 0 6px rgba(34, 225, 255, .9);
+  }
+  .live-time:empty { display: none; }
+
+  .foot {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 16px; padding-top: 13px;
+    border-top: 1px solid rgba(34, 225, 255, .16);
+  }
+  .room { font-size: 12px; letter-spacing: .14em; color: #6f86a8; }
+  .room:empty { display: none; }
+  .mark { display: inline-flex; align-items: flex-end; gap: 4px; height: 14px; }
+  .mark i { display: block; width: 3px; border-radius: 2px; background: rgba(34, 225, 255, .35); box-shadow: 0 0 6px rgba(34, 225, 255, .5); }
+  .mark i:nth-child(1) { height: 5px; }
+  .mark i:nth-child(2) { height: 9px; }
+  .mark i:nth-child(3) { height: 14px; background: #22e1ff; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="inner">
+      <div class="topbar">
+        <span class="brand">{{host_label}}</span>
+      </div>
+
+      <div class="cover-wrap">
+        <img class="cover" src="{{cover_src}}" alt="">
+        <span class="cover-shade"></span>
+        <span class="status">{{status_text}}</span>
+      </div>
+
+      <div class="profile">
+        <img class="avatar" src="{{avatar_src}}" alt="">
+        <div class="who">
+          <div class="name">{{name}}</div>
+          <div class="title">{{title}}</div>
+        </div>
+      </div>
+
+      <div class="meta"><span class="tag">{{area_name}}</span><span class="stat">{{online_text}}</span></div>
+
+      <div class="live-time">{{live_time_text}}</div>
+
+      <div class="foot">
+        <span class="room">{{room_id}}</span>
+        <span class="mark"><i></i><i></i><i></i></span>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

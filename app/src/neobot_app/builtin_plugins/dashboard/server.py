@@ -21,6 +21,7 @@ from neobot_app.panel_auth import get_panel_password_store
 
 from . import system as system_module
 from .api import DashboardApi, _json_error
+from .bilibili_login import BilibiliQrLoginFlow
 from .config import DashboardConfig
 from .config_manager import BotConfigManager, EnvFileManager
 from .metrics import Metrics, latency_sample_capacity
@@ -143,6 +144,9 @@ class DashboardServer:
             env_path=env_path, backup_dir=backup_dir, logger=logger
         )
         self.api = DashboardApi(console=self)
+        self.bilibili_login = BilibiliQrLoginFlow(
+            lambda: self.api._service("bilibili_service")
+        )
 
         self._config_cache: dict[str, Any] = {}
         self._config_cache_key: tuple[int, int] | None = None
@@ -302,6 +306,10 @@ class DashboardServer:
         return self.public_url
 
     async def stop(self) -> None:
+        try:
+            await self.bilibili_login.close()
+        except Exception as exc:
+            self.logger.warning(f"B站扫码登录任务关闭失败: {exc}")
         if self._runner is not None:
             try:
                 await self._runner.cleanup()
@@ -415,6 +423,16 @@ class DashboardServer:
         self._route(app, "POST", "/api/admin/standby/onebot", self.api.admin_standby_onebot)
         self._route(app, "POST", "/api/admin/restart", self.api.admin_restart)
         self._route(app, "POST", "/api/admin/shutdown", self.api.admin_shutdown)
+
+        # B站扫码登录：轻量独立页（不改 React 构建），接口走 /api 鉴权。
+        self._route(app, "GET", "/bilibili/login", self.api.bilibili_login_page)
+        self._route(app, "GET", "/bilibili/login.js", self.api.bilibili_login_script)
+        self._route(
+            app, "GET", "/api/bilibili/login/status", self.api.bilibili_login_status
+        )
+        self._route(
+            app, "POST", "/api/bilibili/login/start", self.api.bilibili_login_start
+        )
 
         self._route(app, "GET", "/favicon.ico", self._favicon)
         self._route(app, "GET", "/image/{name}", self._image)

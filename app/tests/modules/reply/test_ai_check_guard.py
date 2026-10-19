@@ -32,6 +32,19 @@ def test_default_prompts_require_a_real_cancel_tool_call(section):
     text = prompts[section]["template"]
     assert "取消本轮回复必须直接调用 cancel 工具" in text
     assert "讨论或引用这个词不等于调用工具" in text
+    assert "所有对外发言都必须通过工具调用" in text
+    assert "没有调用发送工具就直接输出的正文不会被发送" in text
+
+
+def test_send_reply_definition_declares_the_only_outlet():
+    executor = ReplyToolExecutor(send_reply_handler=AsyncMock(return_value=True))
+    definition = next(
+        item
+        for item in executor.definitions()
+        if item["function"]["name"] == "send_reply"
+    )
+
+    assert "唯一出口" in definition["function"]["description"]
 
 
 def tool_response(name, args):
@@ -41,7 +54,7 @@ def tool_response(name, args):
     }]}
 
 
-async def run_script(monkeypatch, responses, *, full_check=True, kind="group"):
+async def run_script(monkeypatch, responses, *, full_check=True, kind="group", extras=None):
     chat = _FakeChat()
     chat.ai_reply_check = full_check
     chat.ai_reply_check_lightweight = not full_check
@@ -57,7 +70,13 @@ async def run_script(monkeypatch, responses, *, full_check=True, kind="group"):
     monkeypatch.setattr(orch, "_suspend_private_chat", AsyncMock(return_value=([], None)))
     monkeypatch.setattr(orch, "_suspend_group_chat", AsyncMock(return_value=([], None, None)))
     stages, runtime_stages = [], []
-    monkeypatch.setattr(orch, "_record_debug", lambda stage, event, **extra: stages.append(stage))
+
+    def _record_debug(stage, event, **extra):
+        stages.append(stage)
+        if extras is not None:
+            extras.append((stage, extra))
+
+    monkeypatch.setattr(orch, "_record_debug", _record_debug)
 
     async def observe(envelope):
         runtime_stages.append(envelope.stage)
@@ -78,11 +97,36 @@ async def run_script(monkeypatch, responses, *, full_check=True, kind="group"):
 
 
 @pytest.mark.parametrize("full_check", [True, False])
-@pytest.mark.parametrize("via_tool", [True, False])
-@pytest.mark.parametrize("review", ["或者就这句？简短自然", "cancel", ""])
-async def test_review_without_tool_is_failed_and_never_sends_draft(monkeypatch, full_check, via_tool, review):
+async def test_plain_prose_without_tool_is_failed_and_never_sent(monkeypatch, full_check):
+    """没有 tool_calls 的正文一律不发送：不追问、不重试，只留审计。"""
     draft = "你好" if full_check else "很长的待审草稿" * 100
-    first = tool_response("send_reply", {"text": draft}) if via_tool else {"content": draft, "tool_calls": []}
+    extras: list = []
+    event, provider, sent, stages, runtime_stages, queue = await run_script(
+        monkeypatch,
+        [{"content": draft, "tool_calls": []}],
+        full_check=full_check,
+        extras=extras,
+    )
+    assert len(provider.calls) == 1
+    assert event.state is ReplyState.FAILED
+    assert event.completed_at is not None
+    assert "没有调用工具" in event.error
+    assert event.generated_text == ""
+    assert event.send_response is None
+    sent.assert_not_awaited()
+    assert "unsent_prose_detected" in stages
+    audit = dict(extras)["unsent_prose_detected"]
+    assert audit["reply_text"] == draft
+    assert "failed" in stages and "completed" not in stages
+    assert "reply.fail" in runtime_stages and "reply.complete" not in runtime_stages
+    assert not queue.entries("888888")
+
+
+@pytest.mark.parametrize("full_check", [True, False])
+@pytest.mark.parametrize("review", ["或者就这句？简短自然", "cancel", ""])
+async def test_review_without_tool_is_failed_and_never_sends_draft(monkeypatch, full_check, review):
+    draft = "你好" if full_check else "很长的待审草稿" * 100
+    first = tool_response("send_reply", {"text": draft})
     event, provider, sent, stages, runtime_stages, queue = await run_script(
         monkeypatch, [first, {"content": review, "tool_calls": []}], full_check=full_check,
     )
@@ -104,7 +148,7 @@ async def test_review_without_tool_is_failed_and_never_sends_draft(monkeypatch, 
 async def test_structured_review_decisions_still_work(monkeypatch, kind, decision):
     args = {"text": "确认后的正文", "ai_check_approved": True} if decision == "send_reply" else {"reason": "无需参与"}
     event, provider, sent, stages, _, _ = await run_script(monkeypatch, [
-        {"content": "待审草稿", "tool_calls": []}, tool_response(decision, args),
+        tool_response("send_reply", {"text": "待审草稿"}), tool_response(decision, args),
     ], kind=kind)
     assert len(provider.calls) == 2
     assert "ai_reply_check_without_tool_call" not in stages
@@ -127,7 +171,7 @@ async def test_bare_cancel_in_plain_model_output_is_not_claimed_sent(monkeypatch
     assert event.state is ReplyState.FAILED
     assert event.send_response is None
     assert "未发送" in event.error
-    assert "reply_output_dropped" in stages
+    assert "unsent_prose_detected" in stages
     assert "reply.fail" in runtime_stages and "reply.complete" not in runtime_stages
 
 
@@ -135,9 +179,8 @@ async def test_bare_cancel_in_plain_model_output_is_not_claimed_sent(monkeypatch
     ("cancel，是什么意思", ["cancel", "是什么意思"]),
     ("我选择\ncancel", ["我选择", "cancel"]),
 ])
-@pytest.mark.parametrize("via_tool", [False, True])
-async def test_orchestrator_forwards_verified_preview_to_real_sender(monkeypatch, text, segments, via_tool):
-    first = tool_response("send_reply", {"text": text}) if via_tool else {"content": text, "tool_calls": []}
+async def test_orchestrator_forwards_verified_preview_to_real_sender(monkeypatch, text, segments):
+    first = tool_response("send_reply", {"text": text})
     approved = tool_response("send_reply", {
         "text": text, "segments": segments, "ai_check_approved": True,
     })

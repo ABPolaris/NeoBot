@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          # 与 NeoBot 本体一致：requires-python >= 3.13（旧版本连 tomllib 都没有）
+          python-version: "3.13"
+
+      - name: 校验 plugin.toml 与入口一致性
+        run: python .github/scripts/validate_manifest.py
+
+      - name: 字节码编译
+        run: python -m compileall -q .
+
+      - name: 安装测试依赖
+        # pydantic / sqlalchemy / httpx 在真实运行环境由 NeoBot 本体提供，CI 里单独装
+        run: pip install pytest pytest-asyncio pytest-timeout pydantic "sqlalchemy[asyncio]>=2" httpx
+
+      - name: 单元测试
+        # 没有 NeoBot 时 tests/conftest.py 会装一个最小 modloader 替身，
+        # 纯逻辑用例照常跑，需要真实数据库的用例显式跳过
+        run: pytest
+
+      - name: Ruff 静态检查
+        run: pip install ruff && ruff check .

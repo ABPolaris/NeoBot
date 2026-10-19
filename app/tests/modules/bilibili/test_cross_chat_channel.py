@@ -1,0 +1,272 @@
+"""B站跨聊天通道 + CrossChatSkill.bilibili 目标测试。"""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+from neobot_app.bilibili.channel import BilibiliCrossChatChannel, parse_conversation_id
+from neobot_app.skills.cross_chat_skill import CrossChatSkill
+
+
+class FakeEngine:
+    def __init__(self, reply: str | None = "收到", *, available: bool = True) -> None:
+        self.reply = reply
+        self.available = available
+        self.calls: list[tuple[str, str]] = []
+
+    async def generate_task_reply(self, task, *, history=""):
+        self.calls.append((task, history))
+        return self.reply
+
+
+class FakeClient:
+    my_uid = 999
+
+    def __init__(self, *, fail_send: bool = False) -> None:
+        self.fail_send = fail_send
+        self.messages = [
+            SimpleNamespace(sender_uid=55, text="在吗", timestamp=100, is_self=False),
+            SimpleNamespace(sender_uid=999, text="在的", timestamp=101, is_self=True),
+        ]
+        self.comments = [
+            {
+                "member": {"uname": "张三"},
+                "content": {"message": "视频不错"},
+            }
+        ]
+        self.sent_messages: list[tuple[int, str]] = []
+        self.sent_comments: list[dict] = []
+
+    def get_messages(self, talker_id, size=5):
+        return self.messages
+
+    def get_video_comments(self, oid, page=1):
+        return self.comments
+
+    def send_message(self, receiver_id, text):
+        if self.fail_send:
+            return False
+        self.sent_messages.append((receiver_id, text))
+        return True
+
+    def send_comment_reply(self, oid, root, parent, text, *, type_=1):
+        if self.fail_send:
+            return False
+        self.sent_comments.append(
+            {"oid": oid, "root": root, "parent": parent, "text": text, "type_": type_}
+        )
+        return True
+
+
+class FakeHub:
+    def __init__(self) -> None:
+        self.published: list[dict] = []
+
+    async def publish(self, **kwargs):
+        self.published.append(kwargs)
+
+
+def test_parse_conversation_id_private() -> None:
+    assert parse_conversation_id("private:55") == {"kind": "private", "uid": 55}
+
+
+def test_parse_conversation_id_comment() -> None:
+    target = parse_conversation_id("comment:10:20:30")
+
+    assert target == {
+        "kind": "comment",
+        "type_": 1,
+        "oid": 10,
+        "root": 20,
+        "parent": 30,
+    }
+
+
+def test_parse_conversation_id_invalid() -> None:
+    assert parse_conversation_id("") is None
+    assert parse_conversation_id("private:abc") is None
+    assert parse_conversation_id("comment:1:2") is None
+    assert parse_conversation_id("unknown:1:2:3") is None
+
+
+async def test_channel_send_private_task() -> None:
+    client = FakeClient()
+    engine = FakeEngine("收到啦")
+    channel = BilibiliCrossChatChannel(client, engine)
+
+    ok, reply, detail = await channel.send_task("private:55", "告诉对方晚上开黑")
+
+    assert ok is True
+    assert reply == "收到啦"
+    assert client.sent_messages == [(55, "收到啦")]
+    assert engine.calls[0][0] == "告诉对方晚上开黑"
+    assert "在吗" in engine.calls[0][1]  # 私信历史带进上下文
+
+
+async def test_channel_send_comment_task() -> None:
+    client = FakeClient()
+    channel = BilibiliCrossChatChannel(client, FakeEngine("来了"))
+
+    ok, reply, _ = await channel.send_task("dynamic:10:20:30", "回应一下")
+
+    assert ok is True
+    assert client.sent_comments == [
+        {"oid": 10, "root": 20, "parent": 30, "text": "来了", "type_": 17}
+    ]
+
+
+async def test_channel_send_rejects_bad_conversation() -> None:
+    channel = BilibiliCrossChatChannel(FakeClient(), FakeEngine())
+
+    ok, _, detail = await channel.send_task("bad-id", "x")
+
+    assert ok is False
+    assert "格式" in detail
+
+
+async def test_channel_send_without_client_or_engine() -> None:
+    ok, _, detail = await BilibiliCrossChatChannel(None, FakeEngine()).send_task(
+        "private:55", "x"
+    )
+    assert ok is False and "未登录" in detail
+
+    ok, _, detail = await BilibiliCrossChatChannel(FakeClient(), None).send_task(
+        "private:55", "x"
+    )
+    assert ok is False and "引擎" in detail
+
+
+async def test_channel_skip_and_send_failure() -> None:
+    channel = BilibiliCrossChatChannel(FakeClient(), FakeEngine(None))
+    ok, _, detail = await channel.send_task("private:55", "x")
+    assert ok is False and "不回应" in detail
+
+    channel = BilibiliCrossChatChannel(FakeClient(fail_send=True), FakeEngine())
+    ok, _, detail = await channel.send_task("private:55", "x")
+    assert ok is False and "发送失败" in detail
+
+
+async def test_channel_get_history_private_and_comment() -> None:
+    channel = BilibiliCrossChatChannel(FakeClient(), FakeEngine())
+
+    private = await channel.get_history("private:55")
+    assert "在吗" in private and "你:在的" in private
+
+    comment = await channel.get_history("comment:10:20:30")
+    assert "张三" in comment and "视频不错" in comment
+
+
+async def test_channel_get_history_invalid_target() -> None:
+    channel = BilibiliCrossChatChannel(FakeClient(), FakeEngine())
+
+    assert await channel.get_history("bad-id") == ""
+
+
+# ── CrossChatSkill 集成 ──
+
+
+def _cross_chat(channel=None, hub=None) -> CrossChatSkill:
+    return CrossChatSkill(bilibili_channel=channel, notification_hub=hub)
+
+
+async def test_cross_chat_send_to_bilibili() -> None:
+    client = FakeClient()
+    skill = _cross_chat(BilibiliCrossChatChannel(client, FakeEngine("收到")))
+
+    result = json.loads(
+        await skill.execute(
+            "cross_chat_send",
+            {
+                "target_kind": "bilibili",
+                "target_id": "private:55",
+                "task": "告诉对方晚上开黑",
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "responded"
+    assert result["reply"] == "收到"
+    assert client.sent_messages == [(55, "收到")]
+
+
+async def test_cross_chat_send_to_bilibili_with_response_relay() -> None:
+    hub = FakeHub()
+    skill = _cross_chat(
+        BilibiliCrossChatChannel(FakeClient(), FakeEngine("收到")), hub
+    )
+
+    result = json.loads(
+        await skill.execute(
+            "cross_chat_send",
+            {
+                "target_kind": "bilibili",
+                "target_id": "comment:10:20:30",
+                "task": "回应一下",
+                "notification_mode": "response",
+                "pipeline_key": "group:123",
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["relayed"] is True
+    assert hub.published[0]["kind"] == "group"
+    assert hub.published[0]["conversation_id"] == "123"
+
+
+async def test_cross_chat_send_without_bilibili_channel() -> None:
+    skill = _cross_chat()
+
+    result = json.loads(
+        await skill.execute(
+            "cross_chat_send",
+            {"target_kind": "bilibili", "target_id": "private:55", "task": "x"},
+        )
+    )
+
+    assert result["ok"] is False
+    assert "未配置" in result["error"]
+
+
+async def test_cross_chat_query_bilibili() -> None:
+    skill = _cross_chat(BilibiliCrossChatChannel(FakeClient(), FakeEngine()))
+
+    result = json.loads(
+        await skill.execute(
+            "cross_chat_query",
+            {"target_kind": "bilibili", "target_id": "private:55"},
+        )
+    )
+
+    assert result["ok"] is True
+    assert "在吗" in result["history"]
+
+
+async def test_cross_chat_query_without_bilibili_channel() -> None:
+    skill = _cross_chat()
+
+    result = json.loads(
+        await skill.execute(
+            "cross_chat_query",
+            {"target_kind": "bilibili", "target_id": "private:55"},
+        )
+    )
+
+    assert result["ok"] is False
+    assert "未配置" in result["error"]
+
+
+async def test_cross_chat_target_kind_validation_mentions_bilibili() -> None:
+    skill = _cross_chat()
+
+    result = json.loads(
+        await skill.execute(
+            "cross_chat_send",
+            {"target_kind": "telegram", "target_id": "x", "task": "y"},
+        )
+    )
+
+    assert result["ok"] is False
+    assert "bilibili" in result["error"]

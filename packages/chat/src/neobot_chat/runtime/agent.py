@@ -140,6 +140,8 @@ class Agent:
             if not tool_calls:
                 break
             await self._run_tools(tool_calls, messages, heartbeat=heartbeat)
+            # 工具可能改变工具面（skills__load_tools 按需加载），下一轮必须重新取。
+            tools = self._all_tools() or None
 
         return {**state, "messages": messages}
 
@@ -210,6 +212,8 @@ class Agent:
             if not tool_calls:
                 break
             await self._run_tools(tool_calls, messages, heartbeat=heartbeat)
+            # 工具可能改变工具面（skills__load_tools 按需加载），下一轮必须重新取。
+            tools = self._all_tools() or None
 
         yield ChatChunk(state={**state, "messages": messages})
 
@@ -327,7 +331,14 @@ class Agent:
     def _decide_tool_action(self, name: str, args: dict) -> ToolAccessAction:
         spec = self._tool_specs.get(name)
         if spec is None:
-            return "deny" if self._strict_tools else "allow"
+            # 动态工具（如 skills__load_tools 加载的）没有静态 spec，但它是
+            # 工具集明确暴露的；strict 只应拦截工具集根本没提供的名字。
+            if self._strict_tools and not any(
+                tool["function"]["name"] == name
+                for tool in self.toolset.definitions()
+            ):
+                return "deny"
+            return "allow"
         rule = spec.access_resolver(args, self._build_tool_guard_context(), self.toolset.policy)
         return self._resolve_rule(rule)
 

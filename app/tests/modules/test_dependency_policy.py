@@ -124,3 +124,45 @@ def test_all_manifests_share_one_version() -> None:
     }
     assert len(set(versions.values())) == 1, f"各 pyproject.toml 版本不一致：{versions}"
 
+
+
+# ── fix(17): app 依赖的内部 6 包必须钉死到同一版本 ───────────────────────
+
+_INTERNAL_PACKAGES = [
+    "neobot-adapter",
+    "neobot-chat",
+    "neobot-contracts",
+    "neobot-memory",
+    "neobot-modloader",
+    "neobot-storage",
+]
+
+
+def test_app_pins_internal_packages_to_its_own_version() -> None:
+    """app 与内部子包必须同一版本发布，否则会装出「新 app + 旧 chat」。
+
+    没有 pin 时，pip 会把任意已安装版本当成满足条件；import/装配期的破坏性
+    变更最后表现为一句误导性的「配置解析失败」（issue #72）。
+    """
+    data = _load("app/pyproject.toml")
+    version = (data.get("project") or {}).get("version")
+    dependencies = {
+        entry.strip().split(";")[0].strip()
+        for entry in (data.get("project") or {}).get("dependencies") or []
+    }
+    expected = {f"{package}=={version}" for package in _INTERNAL_PACKAGES}
+    missing = sorted(expected - dependencies)
+    assert not missing, f"app/pyproject.toml 缺少内部包版本限定：{missing}"
+
+
+def test_internal_pins_follow_version_bump() -> None:
+    """抬版本时若忘记同步 6 条 pin，这里必须变红（防止发布新版本时漏改）。"""
+    app_version = (_load("app/pyproject.toml").get("project") or {}).get("version")
+    root_version = (_load("pyproject.toml").get("project") or {}).get("version")
+    assert app_version == root_version
+    pinned = {
+        entry.strip().split("==")[1]
+        for entry in (_load("app/pyproject.toml").get("project") or {}).get("dependencies") or []
+        if any(entry.strip().startswith(name + "==") for name in _INTERNAL_PACKAGES)
+    }
+    assert pinned == {app_version}, f"内部包 pin 与 app 版本不一致：{pinned} != {app_version}"

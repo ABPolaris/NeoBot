@@ -295,3 +295,74 @@ def migrate_v6_to_v7(old: dict) -> dict:
     if migrated_models:
         new["models"] = migrated_models
     return new
+
+
+#: 与面板 ROLE_MODEL_TYPES 一致；迁移里不 import 面板模块，避免把 aiohttp 拉进配置层。
+_ROLE_MODEL_TYPES_V8: dict[str, str] = {
+    "primary_chat_model": "chat",
+    "agent_model_1": "chat",
+    "agent_model_2": "chat",
+    "agent_model_3": "chat",
+    "vision_model": "vision",
+    "tts_model": "tts",
+    "creator_image_models": "image",
+}
+
+
+@Config.migration(from_version="0.7.0", to_version="0.8.0")
+def migrate_v7_to_v8(old: dict) -> dict:
+    """迁移 0.7.0 -> 0.8.0：按分配角色推断模型条目的 model_type。
+
+    仅当条目类型缺失/为 chat、且引用它的角色全部是非 chat 类型且类型一致时推断；
+    混合角色、显式非 chat、未被引用的条目都不动。
+    """
+    new: dict[str, Any] = {"version": "0.8.0"}
+    for key, value in old.items():
+        if key in ("version", "models"):
+            continue
+        new[key] = value
+
+    models = old.get("models")
+    if not isinstance(models, dict):
+        return new
+
+    registry = models.get("registry")
+    assignments = models.get("assignments")
+    if not isinstance(registry, list) or not isinstance(assignments, dict):
+        new["models"] = models
+        return new
+
+    role_types: dict[str, str] = {}
+    for role, value in assignments.items():
+        refs = value if isinstance(value, list) else [value]
+        for ref in refs:
+            text = str(ref or "").strip()
+            if text:
+                role_types.setdefault(text, set()).add(
+                    _ROLE_MODEL_TYPES_V8.get(str(role), "chat")
+                )
+
+    migrated: list[Any] = []
+    changed = False
+    for entry in registry:
+        if not isinstance(entry, dict):
+            migrated.append(entry)
+            continue
+        item = dict(entry)
+        ref = str(item.get("model_ref") or "").strip()
+        current = str(item.get("model_type") or "").strip().lower()
+        if ref and (not current or current == "chat"):
+            types = role_types.get(ref, set())
+            if len(types) == 1 and "chat" not in types:
+                item["model_type"] = next(iter(types))
+                changed = True
+        migrated.append(item)
+
+    new_models = {k: v for k, v in models.items() if k not in ("registry", "assignments")}
+    if changed:
+        new_models["registry"] = migrated
+    else:
+        new_models["registry"] = registry
+    new_models["assignments"] = assignments
+    new["models"] = new_models
+    return new

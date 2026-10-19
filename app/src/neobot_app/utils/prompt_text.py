@@ -10,6 +10,7 @@ user_profiles，转义函数放在 prompt.render 会形成循环导入。
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 #: 会被替换成全角等价字符的 XML/模板元字符。用全角（而不是 html.escape 的
@@ -26,3 +27,17 @@ def escape_prompt_text(value: Any) -> str:
     for char, replacement in _XML_META_CHARS.items():
         text = text.replace(char, replacement)
     return text
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def single_line_prompt_text(value: Any, *, limit: int = 32) -> str:
+    """把昵称等用户可控短文本压成单行再转义（换行/控制符变空格，超长截断）。
+
+    用于图片附录这类**没有区块包裹**的标注：昵称里的换行会把一行标注拆成多行，
+    超过 limit 的昵称没有必要完整进入提示词。
+    """
+    text = _CONTROL_CHARS.sub(" ", escape_prompt_text(value))
+    text = " ".join(text.split())
+    return text[:limit]
