@@ -69,7 +69,14 @@ class AgentToolRuntime:
         self.sandbox, self.provider = sandbox, provider
         self.vision_provider, self.skill_manager = vision_provider, skill_manager
         self.hub = notification_hub
-        self.permissions = ToolPermissions(credential_manager)
+        self.permissions = ToolPermissions(
+            credential_manager,
+            reviewer=provider,
+            auto_review=bool(getattr(self.config, "auto_review", True)),
+            review_timeout_seconds=float(
+                getattr(self.config, "review_timeout_seconds", 30.0) or 30.0
+            ),
+        )
         self.state = StateTools(state_dir / "state", approve=self._approve_plan, max_goal_rounds=self.config.max_goal_rounds)
         self.files = AgentFileTools(sandbox)
         self.processes = ProcessTools(self.workspace, completion_callback=self._notify)
@@ -144,7 +151,9 @@ class AgentToolRuntime:
         return [ptc_tool_definition(base + (external or []), concurrency_safe=_SAFE_READS)]
 
     async def _approve_plan(self, context: ToolContext, *plan: Any) -> bool:
-        self.permissions.require(context, "agent_plan")
+        await self.permissions.authorize(
+            context, "agent_plan", tool_name="exit_plan_mode", arguments={"plan": plan}
+        )
         return True
 
     async def _notify(self, context: ToolContext, result: dict) -> None:
@@ -230,20 +239,28 @@ class AgentToolRuntime:
                 if self.state.is_planning(context) and name not in _PLAN_ALLOWED:
                     raise AgentToolError("PLAN_MODE", "Plan mode permits inspection only; approve the plan before mutation")
                 if name in _EXECUTION:
-                    self.permissions.require(context, "agent_execute")
+                    await self.permissions.authorize(
+                        context, "agent_execute", tool_name=name, arguments=args
+                    )
                 if self.files.is_shared_write(name, args):
-                    self.permissions.require(context, "agent_shared_write")
+                    await self.permissions.authorize(
+                        context, "agent_shared_write", tool_name=name, arguments=args
+                    )
                 if name == "create_goal" or (name == "update_goal" and args.get("action") in {"resume", "edit"}):
                     if context.parent_agent_id is not None or not context.human_request:
                         raise AgentToolError("HUMAN_REQUIRED", "Only a direct human request can create or resume a goal")
-                    self.permissions.require(context, "agent_goal")
+                    await self.permissions.authorize(
+                        context, "agent_goal", tool_name=name, arguments=args
+                    )
                 if (name == "update_goal" and args.get("action") in {"complete", "blocked"}
                         and not context.human_request and not self.goals.is_running_round(context)):
                     raise AgentToolError("GOAL_ROUND_REQUIRED", "A matching live goal round is required")
                 if name == "ralph":
                     if context.parent_agent_id is not None or not context.human_request:
                         raise AgentToolError("HUMAN_REQUIRED", "Ralph requires a direct human request and administrator approval")
-                    self.permissions.require(context, "agent_ralph")
+                    await self.permissions.authorize(
+                        context, "agent_ralph", tool_name=name, arguments=args
+                    )
                 if name == "read_image":
                     path = self.files.resolve_path(args["file_path"], owner=context.owner, chat_flow_id=context.chat_flow_id)
                     from neobot_app.skills.image_parse_skill import ImageParseSkill

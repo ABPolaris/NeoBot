@@ -23,6 +23,7 @@ from neobot_chat.schema.types import (
 )
 from neobot_chat.tools.toolset import ToolSpec, Toolset
 from neobot_contracts.ports.logging import Logger, NullLogger
+from neobot_app.agent_tools.review import review_action
 from neobot_app.reply.output_guard import clean_segments, clean_text
 from neobot_app.reply.postprocess import (
     ReplyPostProcessResult,
@@ -255,8 +256,14 @@ class ReplyToolExecutor(ToolExecutor):
         config: Any = None,
         config_update_callback: Any = None,
         native_vision_provider: Any = None,
+        reviewer: Any = None,
+        auto_review: bool = True,
+        review_timeout_seconds: float = 30.0,
     ) -> None:
         self._native_vision_provider = native_vision_provider
+        self._reviewer = reviewer
+        self._auto_review = bool(auto_review)
+        self._review_timeout = max(1.0, float(review_timeout_seconds or 30.0))
         self._send_reply = send_reply_handler
         self._willing = willing_service
         self._numbering = numbering
@@ -984,7 +991,7 @@ class ReplyToolExecutor(ToolExecutor):
         if name == "wait":
             return await self._execute_wait(args)
         if name == "adjust_reply_willingness":
-            return self._execute_adjust_willingness(args)
+            return await self._execute_adjust_willingness(args)
         if name == "get_willingness_config":
             return self._execute_get_willingness_config()
         if name == "manage_willing_config":
@@ -1767,12 +1774,12 @@ class ReplyToolExecutor(ToolExecutor):
         self._last_wait_time = now
         return await self._wait(seconds=seconds)
 
-    def _execute_adjust_willingness(self, args: dict) -> str:
+    async def _execute_adjust_willingness(self, args: dict) -> str:
         if self._willing is None:
             return "错误：回复意愿服务未配置"
         action = str(args.get("action") or "")
         if action == "set_global":
-            return self._execute_set_global_willing(args)
+            return await self._execute_set_global_willing(args)
         current_conv_id = str(self._conv_id or "").strip()
         requested_conv_id = str(args.get("conv_id") or current_conv_id).strip()
         if action in {
@@ -1802,7 +1809,7 @@ class ReplyToolExecutor(ToolExecutor):
             return self._willing.remove_runtime_blacklist(current_conv_id)
         return f"错误：未知操作 {action}"
 
-    def _execute_set_global_willing(self, args: dict) -> str:
+    async def _execute_set_global_willing(self, args: dict) -> str:
         """设置全局回复意愿系数(运行时):需 willing_global 凭据。
 
         凭据类型由 agent 在凭据 skill 申请时决定:临时调整用 one_time,
@@ -1822,7 +1829,7 @@ class ReplyToolExecutor(ToolExecutor):
         chat_flow = self._credential_chat_flow()
         if chat_flow is None:
             return "错误：无法确定当前会话"
-        missing = self._credential_missing_message(
+        missing = await self._credential_missing_message(
             chat_flow, "willing_global", "全局回复意愿"
         )
         if missing is not None:
@@ -1835,7 +1842,7 @@ class ReplyToolExecutor(ToolExecutor):
         chat_flow = self._credential_chat_flow()
         if chat_flow is None:
             return "错误：无法确定当前会话"
-        missing = self._credential_missing_message(
+        missing = await self._credential_missing_message(
             chat_flow, "willing_config", "修改全局回复意愿配置"
         )
         if missing is not None:
@@ -1901,7 +1908,7 @@ class ReplyToolExecutor(ToolExecutor):
             return None
         return f"{conv_kind}:{conv_id}"
 
-    def _credential_missing_message(
+    async def _credential_missing_message(
         self, chat_flow: str, action: str, purpose: str
     ) -> str | None:
         """检查并消费凭据;无可用凭据时返回引导文案,否则返回 None。"""
@@ -1915,6 +1922,23 @@ class ReplyToolExecutor(ToolExecutor):
         )
         if credential is not None:
             return None
+        if self._auto_review and self._reviewer is not None:
+            allowed, reason, code = await review_action(
+                self._reviewer,
+                action=action,
+                tool_name="manage_willing",
+                params={"purpose": purpose, "chat_flow": chat_flow},
+                timeout=self._review_timeout,
+                domain="QQ bot reply willingness",
+            )
+            if allowed:
+                return None
+            if code == "AUTO_REVIEW_UNAVAILABLE":
+                return f"错误：自动审查不可用（{reason}），请先申请管理员凭据后再试。"
+            return (
+                f"错误：{purpose}被自动审查拒绝：{reason}。"
+                f"若认为审查器误判，可调用 credential__request 申请管理员凭据覆盖。"
+            )
         return (
             f"需要管理员凭据才能执行{purpose}。\n"
             f"请调用凭据 skill 的 request 工具申请凭据: action={action}\n"
@@ -2640,6 +2664,9 @@ def build_reply_toolset(
     config: Any = None,
     config_update_callback: Any = None,
     native_vision_provider: Any = None,
+    reviewer: Any = None,
+    auto_review: bool = True,
+    review_timeout_seconds: float = 30.0,
 ) -> Toolset:
     executor = ReplyToolExecutor(
         send_reply_handler=send_reply_handler,
@@ -2682,6 +2709,9 @@ def build_reply_toolset(
         config=config,
         config_update_callback=config_update_callback,
         native_vision_provider=native_vision_provider,
+        reviewer=reviewer,
+        auto_review=auto_review,
+        review_timeout_seconds=review_timeout_seconds,
     )
     definitions = executor.definitions()
     specs = [

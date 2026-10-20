@@ -4,11 +4,72 @@ from __future__ import annotations
 from typing import Any
 
 from neobot_app.agent_tools.contracts import AgentToolError, ToolContext
+from neobot_app.agent_tools.review import review_action
 
 
 class ToolPermissions:
-    def __init__(self, credential_manager: Any = None) -> None:
+    def __init__(
+        self,
+        credential_manager: Any = None,
+        *,
+        reviewer: Any = None,
+        auto_review: bool = True,
+        review_timeout_seconds: float = 30.0,
+    ) -> None:
         self.manager = credential_manager
+        self.reviewer = reviewer
+        self.auto_review = bool(auto_review)
+        self.review_timeout = max(1.0, float(review_timeout_seconds or 30.0))
+
+    async def authorize(
+        self,
+        context: ToolContext,
+        action: str,
+        *,
+        tool_name: str = "",
+        arguments: dict[str, Any] | None = None,
+    ) -> None:
+        """自动审查优先；审查拒绝/不可用回退凭据；凭据=人工覆盖。"""
+        if not isinstance(context, ToolContext):
+            raise AgentToolError("CONTEXT_REQUIRED", "Trusted invocation context required")
+        if self.manager is not None and self.manager.consume(
+            chat_flow=context.chat_flow_id, action=action, commit=True
+        ) is not None:
+            return
+        if not self.auto_review or self.reviewer is None:
+            self.require(context, action)
+            return
+        allowed, reason, code = await review_action(
+            self.reviewer,
+            action=action,
+            tool_name=tool_name,
+            params=arguments,
+            timeout=self.review_timeout,
+            domain="agent tool / host execution",
+        )
+        if allowed:
+            return
+        if code == "AUTO_REVIEW_UNAVAILABLE":
+            self.require(context, action)
+            return
+        if self.manager is None:
+            raise AgentToolError(
+                "CREDENTIAL_UNAVAILABLE",
+                f"动作 {action} 被自动审查拒绝（{reason}），当前没有管理员凭据可覆盖。",
+                details={"action": action, "tool": tool_name, "safety": "review"},
+            )
+        raise AgentToolError(
+            "AUTO_REVIEW_DENIED",
+            f"动作 {action} 被自动审查拒绝：{reason}。若认为审查器误判，可申请管理员凭据覆盖："
+            f"先调用 credential__request(action='{action}')，签发后重试。",
+            details={
+                "action": action,
+                "tool": tool_name,
+                "reason": reason,
+                "request_tool": "credential__request",
+                "request_args": {"action": action, "credential_type": "one_time"},
+            },
+        )
 
     def require(self, context: ToolContext, action: str) -> None:
         """Consume immediately before a sensitive operation; never grant from model text."""

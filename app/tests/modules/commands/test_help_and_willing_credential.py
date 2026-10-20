@@ -172,28 +172,31 @@ class _FakeConfig:
     chat = _Chat()
 
 
-def test_set_global_without_credential_guides() -> None:
+@pytest.mark.asyncio
+async def test_set_global_without_credential_guides() -> None:
     tools = _build_tools(credential_manager=_FakeCredentialManager(available=False))
-    result = tools._execute_set_global_willing({"value": 0.5})
+    result = await tools._execute_set_global_willing({"value": 0.5})
     assert "凭据" in result
     assert "willing_global" in result
     assert "one_time" in result
     assert "timed" in result
 
 
-def test_set_global_with_credential_succeeds() -> None:
+@pytest.mark.asyncio
+async def test_set_global_with_credential_succeeds() -> None:
     willing = _FakeWilling()
     cred = _FakeCredentialManager(available=True)
     tools = _build_tools(willing_service=willing, credential_manager=cred)
-    result = tools._execute_set_global_willing({"value": 0.4})
+    result = await tools._execute_set_global_willing({"value": 0.4})
     assert "已设为 0.400" in result
     assert willing.global_coeff == 0.4
     assert cred.consumed == [("group:111111", "willing_global")]
 
 
-def test_set_global_requires_value() -> None:
+@pytest.mark.asyncio
+async def test_set_global_requires_value() -> None:
     tools = _build_tools()
-    assert "value" in tools._execute_set_global_willing({})
+    assert "value" in await tools._execute_set_global_willing({})
 
 
 @pytest.mark.asyncio

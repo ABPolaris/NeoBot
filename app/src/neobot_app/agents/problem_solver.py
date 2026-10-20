@@ -1000,7 +1000,12 @@ class ProblemSolverToolExecutor(ToolExecutor):
             if self._runtime.state.is_planning(context):
                 raise AgentToolError("PLAN_MODE", "Cannot write files in plan mode")
             if self._runtime.files.is_shared_write("write", {"file_path": raw}):
-                self._runtime.permissions.require(context, "agent_shared_write")
+                await self._runtime.permissions.authorize(
+                    context,
+                    "agent_shared_write",
+                    tool_name="write_file_base64",
+                    arguments={"file_path": raw, "content_base64": args.get("content_base64", "")},
+                )
             if path.exists():
                 raise AgentToolError("FILE_EXISTS", "Binary write requires a new destination; use a new filename")
             await self._sandbox.write_file(path, data)

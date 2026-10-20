@@ -1582,6 +1582,14 @@ class AgentToolsConfig:
     max_goal_rounds: int = field(default=8, metadata={"description": "同一目标的最大自动轮数"})
     max_child_agents: int = field(default=8, metadata={"description": "每个 owner 的子 agent 数量上限"})
     max_output_bytes: int = field(default=262144, metadata={"description": "单次共享工具输出的最大 UTF-8 字节数"})
+    auto_review: bool = field(
+        default=True,
+        metadata={"description": "沙箱/宿主执行等敏感工具默认 AI 自动审查；false=回到旧凭据门控"},
+    )
+    review_timeout_seconds: float = field(
+        default=30.0,
+        metadata={"description": "敏感工具自动审查单次模型调用超时（秒）"},
+    )
 
 
 @dataclass

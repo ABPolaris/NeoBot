@@ -92,6 +92,9 @@ class SandboxManagerSkill(SkillModule):
         file_server: Any = None,
         hold_max_minutes: int = 120,
         credential_manager: Any = None,
+        reviewer: Any = None,
+        auto_review: bool = True,
+        review_timeout_seconds: float = 30.0,
     ) -> None:
         self._sandbox = sandbox_service
         from neobot_app.runtime.agent_file_tools import AgentFileTools
@@ -102,7 +105,12 @@ class SandboxManagerSkill(SkillModule):
         self._file_server = file_server
         self._hold_max_minutes = hold_max_minutes
         from neobot_app.agent_tools.permissions import ToolPermissions
-        self._permissions = ToolPermissions(credential_manager)
+        self._permissions = ToolPermissions(
+            credential_manager,
+            reviewer=reviewer,
+            auto_review=bool(auto_review),
+            review_timeout_seconds=float(review_timeout_seconds or 30.0),
+        )
 
     def reset(self) -> None:
         pass
@@ -415,7 +423,9 @@ class SandboxManagerSkill(SkillModule):
                 raw = clean.get("file_path", clean.get("path", "." if operation in {"glob", "grep"} else None))
                 path = resolve(raw, write=operation in {"write", "edit"})
                 if operation in {"write", "edit"} and shared(raw):
-                    self._permissions.require(context, "agent_shared_write")
+                    await self._permissions.authorize(
+                        context, "agent_shared_write", tool_name=name, arguments=clean
+                    )
                 values = dict(clean)
                 if operation in {"glob", "grep"}:
                     values.pop("file_path", None)
@@ -472,7 +482,9 @@ class SandboxManagerSkill(SkillModule):
                 if dst.is_dir():
                     resolve(destination.rstrip("/\\") + "/" + src.name, write=True)
                 if shared(destination) or (name == "move_file" and shared(source)):
-                    self._permissions.require(context, "agent_shared_write")
+                    await self._permissions.authorize(
+                        context, "agent_shared_write", tool_name=name, arguments=clean
+                    )
                 operation = self._sandbox.move_file if name == "move_file" else self._sandbox.copy_file
                 await operation(src, dst)
                 return _json({"ok": True})
@@ -512,7 +524,9 @@ class SandboxManagerSkill(SkillModule):
             path = resolve(raw, write=writing)
             if name == "delete_file":
                 if shared(raw):
-                    self._permissions.require(context, "agent_shared_write")
+                    await self._permissions.authorize(
+                        context, "agent_shared_write", tool_name=name, arguments=clean
+                    )
                 await self._sandbox.delete_file(path)
                 return _json({"ok": True})
             if name == "write_file_base64":
@@ -525,14 +539,20 @@ class SandboxManagerSkill(SkillModule):
                 with self._sandbox.file_lock(path):
                     resolve(raw, write=True)
                     if shared(raw):
-                        self._permissions.require(context, "agent_shared_write")
+                        await self._permissions.authorize(
+                            context, "agent_shared_write", tool_name=name, arguments=clean
+                        )
                     elif path.exists():
-                        self._permissions.require(context, "agent_execute")
+                        await self._permissions.authorize(
+                            context, "agent_execute", tool_name=name, arguments=clean
+                        )
                     self._sandbox.atomic_write(path, data)
                 return _json({"ok": True, "path": str(path), "size": len(data)})
             if name == "download_file":
                 if shared(raw):
-                    self._permissions.require(context, "agent_shared_write")
+                    await self._permissions.authorize(
+                        context, "agent_shared_write", tool_name=name, arguments=clean
+                    )
                 bound["save_name"] = str(path)
                 return await _HANDLERS[name](self, bound)
             if name in {"send_file", "send_chat_file"}:

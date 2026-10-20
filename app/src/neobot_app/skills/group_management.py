@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from neobot_app.skills.base import SkillModule
+from neobot_app.agent_tools.review import review_action
 
 def _json(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False, sort_keys=True)
@@ -37,9 +38,20 @@ class GroupManagementSkill(SkillModule):
             "  delete_msg — 撤回消息"
         )
 
-    def __init__(self, adapter: Any = None, credential_manager: Any = None) -> None:
+    def __init__(
+        self,
+        adapter: Any = None,
+        credential_manager: Any = None,
+        *,
+        reviewer: Any = None,
+        auto_review: bool = True,
+        review_timeout_seconds: float = 30.0,
+    ) -> None:
         self._adapter = adapter
         self._credential_manager = credential_manager
+        self._reviewer = reviewer
+        self._auto_review = bool(auto_review)
+        self._review_timeout = max(1.0, float(review_timeout_seconds or 30.0))
 
     def reset(self) -> None:
         pass
@@ -106,14 +118,40 @@ async def _handle_manage_group(self: GroupManagementSkill, args: dict) -> str:
                     chat_flow=chat_flow, action=action
                 )
             if credential is None:
-                return _json({
-                    "ok": False,
-                    "error": (
-                        f"操作 {action} 需要超级管理员凭据。"
-                        f"请先调用 credential__request 申请凭据(action=\"{action}\"),"
-                        "再请超级管理员在群内发送凭据文本,然后重试本操作。"
-                    ),
-                })
+                if self._auto_review and self._reviewer is not None:
+                    allowed, reason, code = await review_action(
+                        self._reviewer,
+                        action=action,
+                        tool_name="manage_group",
+                        params=args,
+                        timeout=self._review_timeout,
+                        domain="QQ group management",
+                    )
+                    if allowed:
+                        credential = True
+                    elif code != "AUTO_REVIEW_UNAVAILABLE":
+                        return _json({
+                            "ok": False,
+                            "code": "AUTO_REVIEW_DENIED",
+                            "error": (
+                                f"操作 {action} 被自动审查拒绝：{reason}。"
+                                "若认为审查器误判，可调用 credential__request 申请管理员凭据覆盖。"
+                            ),
+                            "request_tool": "credential__request",
+                            "request_args": {"action": action, "credential_type": "one_time"},
+                            "review_reason": reason,
+                        })
+                    else:
+                        return _json({"ok": False, "code": "AUTO_REVIEW_UNAVAILABLE", "error": f"自动审查不可用（{reason}），请申请管理员凭据后重试。"})
+                else:
+                    return _json({
+                        "ok": False,
+                        "error": (
+                            f"操作 {action} 需要超级管理员凭据。"
+                            f"请先调用 credential__request 申请凭据(action=\"{action}\"),"
+                            "再请超级管理员在群内发送凭据文本,然后重试本操作。"
+                        ),
+                    })
         api_action, params = _group_action_params(action, args)
         result = await self._adapter.call_api(api_action, params)
         return _json({"ok": True, "action": action, "api": api_action, "result": str(result)})

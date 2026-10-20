@@ -5,7 +5,7 @@ covers:
   - app/src/neobot_app/runtime/hot_reload_registry.py
   - app/src/neobot_app/bootstrap/_config.py
 verified_against: 2a86224
-verified_hash: 9d520fd9cb21
+verified_hash: 1b28fdecc88f
 ---
 
 # 01b 配置系统：schema 分层 · 加载校验 · 默认值回落 · 热重载边界
