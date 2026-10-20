@@ -80,31 +80,135 @@ def test_get_at_feed_returns_empty_on_api_error() -> None:
     assert _client(session).get_at_feed() == []
 
 
-def test_get_video_comments_signs_wbi_params() -> None:
+def _comments_page(
+    replies: list[dict], *, is_end: bool = True, next_offset: str = ""
+) -> FakeResponse:
+    return FakeResponse(
+        {
+            "code": 0,
+            "data": {
+                "replies": replies,
+                "cursor": {
+                    "is_end": is_end,
+                    "pagination_reply": {"next_offset": next_offset},
+                },
+            },
+        }
+    )
+
+
+def test_get_comments_signs_wbi_and_returns_cursor() -> None:
+    replies = [{"rpid": 1}, {"rpid": 2}]
     session = FakeSession(
         [
             FakeResponse(_NAV_WBI),
-            FakeResponse({"code": 0, "data": {"replies": [{"rpid": 1}, {"rpid": 2}]}}),
+            _comments_page(replies, is_end=False, next_offset="next-1"),
         ]
     )
-    replies = _client(session).get_video_comments(oid=170001, page=2, order="time")
-    assert [item["rpid"] for item in replies] == [1, 2]
-    params = session.calls[-1]["params"]
+    page = _client(session).get_comments(
+        oid=170001, comment_type=17, mode="time", cursor="prev", page_size=5
+    )
+    assert [item["rpid"] for item in page["items"]] == [1, 2]
+    assert page["cursor"] == "next-1"
+    assert page["is_end"] is False
+    assert page["raw"]["replies"] == replies
+    call = session.calls[-1]
+    assert call["url"].endswith("/x/v2/reply/wbi/main")
+    params = call["params"]
     # WBI 签名会把参数值统一转成字符串再计算 w_rid。
-    assert params["type"] == "1"
+    assert params["type"] == "17"
     assert params["oid"] == "170001"
     assert params["mode"] == "2"
-    assert params["next"] == "1"
-    assert params["wts"]
+    assert params["pagination_str"] == '{"offset":"prev"}'
+    assert params["plat"] == "1"
+    assert params["seek_rpid"] == ""
+    assert params["web_location"] == "1315875"
     assert len(params["w_rid"]) == 32
 
 
-def test_get_video_comments_hot_uses_mode_3() -> None:
+def test_get_comments_dedupes_and_truncates_page_size() -> None:
     session = FakeSession(
-        [FakeResponse(_NAV_WBI), FakeResponse({"code": 0, "data": {"replies": []}})]
+        [
+            FakeResponse(_NAV_WBI),
+            _comments_page([{"rpid": 1}, {"rpid": 2}, {"rpid": 1}, {"rpid": 3}]),
+        ]
     )
-    assert _client(session).get_video_comments(oid=1, order="hot") == []
+    page = _client(session).get_comments(1, 1, page_size=3)
+    assert [item["rpid"] for item in page["items"]] == [1, 2, 3]
+    assert page["is_end"] is True and page["cursor"] == ""
+
+
+def test_get_comments_returns_empty_page_on_bad_args_or_api_error() -> None:
+    session = FakeSession(
+        [FakeResponse(_NAV_WBI), FakeResponse({"code": -404, "message": "啥都木有"})]
+    )
+    client = _client(session)
+    empty = {"items": [], "cursor": "", "is_end": True, "raw": {}}
+    assert client.get_comments(0, 1) == empty
+    assert client.get_comments(1, 3) == empty  # 3 不是有效评论区类型
+    assert client.get_comments(1, 99) == empty
+    assert session.calls == []
+    assert client.get_comments(1, 1) == empty
+    assert len(session.calls) == 2  # nav + 评论接口
+
+
+def test_get_video_comments_compat_walks_cursor_pages() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(_NAV_WBI),
+            _comments_page([{"rpid": 1}], is_end=False, next_offset="cursor-1"),
+            _comments_page([{"rpid": 2}]),
+        ]
+    )
+    client = _client(session)
+    assert client.get_video_comments(170001, page=2, order="time") == [{"rpid": 2}]
+    assert session.calls[-2]["params"]["pagination_str"] == '{"offset":""}'
+    assert session.calls[-1]["params"]["pagination_str"] == '{"offset":"cursor-1"}'
+    assert session.calls[-1]["params"]["mode"] == "2"
+    assert session.calls[-1]["params"]["type"] == "1"
+
+
+def test_get_video_comments_compat_returns_empty_past_end() -> None:
+    session = FakeSession([FakeResponse(_NAV_WBI), _comments_page([{"rpid": 1}])])
+    assert _client(session).get_video_comments(170001, page=2, order="hot") == []
     assert session.calls[-1]["params"]["mode"] == "3"
+
+
+def test_get_work_comments_resolves_bv_to_aid() -> None:
+    session = FakeSession(
+        [
+            FakeResponse({"code": 0, "data": {"aid": 170001}}),
+            FakeResponse(_NAV_WBI),
+            _comments_page([{"rpid": 1}]),
+        ]
+    )
+    page = _client(session).get_work_comments(
+        "https://www.bilibili.com/video/BV1xx411c7mD", 1
+    )
+    assert [item["rpid"] for item in page["items"]] == [1]
+    assert session.calls[0]["url"].endswith("/x/web-interface/view")
+    assert session.calls[-1]["params"]["oid"] == "170001"
+    assert session.calls[-1]["params"]["type"] == "1"
+
+
+def test_get_work_comments_uses_dynamic_id_directly() -> None:
+    session = FakeSession([FakeResponse(_NAV_WBI), _comments_page([])])
+    page = _client(session).get_work_comments("987654321", 17)
+    assert page["items"] == []
+    assert len(session.calls) == 2
+    assert session.calls[-1]["params"]["oid"] == "987654321"
+    assert session.calls[-1]["params"]["type"] == "17"
+
+
+def test_get_work_comments_unresolvable_returns_empty_without_request() -> None:
+    session = FakeSession()
+    assert _client(session).get_work_comments("没有作品号", 1) == {
+        "items": [],
+        "cursor": "",
+        "is_end": True,
+        "raw": {},
+    }
+    assert session.calls == []
 
 
 def test_get_comment_replies_hits_reply_reply_and_signs() -> None:
@@ -129,6 +233,29 @@ def test_get_comment_replies_hits_reply_reply_and_signs() -> None:
     assert params["pn"] == "2"
     assert params["ps"] == "10"
     assert len(params["w_rid"]) == 32
+
+
+def test_get_comment_replies_supports_cursor_type_pn_ps_aliases() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(_NAV_WBI),
+            FakeResponse({"code": 0, "data": {"replies": [{"rpid": 11}]}}),
+            FakeResponse({"code": 0, "data": {"replies": [{"rpid": 12}]}}),
+        ]
+    )
+    client = _client(session)
+    assert client.get_comment_replies(
+        987654321, 9, type_=17, cursor="3", ps=5
+    ) == [{"rpid": 11}]
+    assert client.get_comment_replies(987654321, 9, pn=4, page_size=6) == [{"rpid": 12}]
+    cursor_params = session.calls[1]["params"]
+    assert cursor_params["type"] == "17"
+    assert cursor_params["pn"] == "3"
+    assert cursor_params["ps"] == "5"
+    alias_params = session.calls[2]["params"]
+    assert alias_params["type"] == "1"
+    assert alias_params["pn"] == "4"
+    assert alias_params["ps"] == "6"
 
 
 def test_get_comment_replies_returns_empty_on_error_or_bad_args() -> None:
