@@ -2914,3 +2914,31 @@ def test_render_tool_package_index_lists_tools_directly():
     assert "agent_tools_web: agent_tools__web_search, agent_tools__web_fetch" in text
     assert "empty_pkg" not in text
     assert _render_tool_package_index(None) == ""
+
+
+async def test_private_history_compact_uses_dsh_checkpoint():
+    """私聊超限压缩使用 DSH 检查点，而不是直接结束会话。"""
+    provider = _ScriptedProvider(
+        [{"content": "## Primary Request and Intent\n- 用户想继续聊天\n\n## Critical Context\n- 保留偏好：喜欢猫"}]
+    )
+    orch = _make_orchestrator(provider=provider)
+    messages = [{"role": "system", "content": "system"}]
+    for index in range(30):
+        messages.append(
+            {"role": "user" if index % 2 == 0 else "assistant", "content": f"m{index}"}
+        )
+    event = SimpleNamespace(
+        event_id="evt",
+        conversation_ref=SimpleNamespace(kind="private", id="123456"),
+    )
+    recorded: list[str] = []
+    orch._record_debug = lambda stage, event, **kw: recorded.append(stage)  # type: ignore[method-assign]
+    compacted = await orch._compact_private_history(
+        messages, event=event, queue_key="123456"
+    )
+    assert compacted is True
+    assert any(
+        "<compacted-summary>" in str(item.get("content") or "") for item in messages
+    )
+    assert "private_context_compacted" in recorded
+    await orch.shutdown()
