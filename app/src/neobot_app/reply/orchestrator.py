@@ -2731,6 +2731,14 @@ class ReplyOrchestrator:
             config=self._config,
             config_update_callback=self._config_update_callback,
             native_vision_provider=self._provider,
+            reviewer=self._provider,
+            auto_review=bool(
+                getattr(getattr(getattr(self._config, "agent", None), "tools", None), "auto_review", True)
+            ),
+            review_timeout_seconds=float(
+                getattr(getattr(getattr(self._config, "agent", None), "tools", None), "review_timeout_seconds", 30.0)
+                or 30.0
+            ),
         )
         self._tool_executors[event.event_id] = reply_toolset.executor
         # 本轮预激活（插件消息意图入口）：在构建工具表**之前**加载指定技能包，
