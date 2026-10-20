@@ -270,7 +270,9 @@ class BilibiliPrivateMonitor:
     def _cooldown_ok(self, talker_id: int) -> bool:
         if self._cooldown <= 0:
             return True
-        last = self._last_reply_at.get(talker_id, 0.0)
+        last = self._last_reply_at.get(talker_id)
+        if last is None:
+            return True
         return time.monotonic() - last >= self._cooldown
 
 
