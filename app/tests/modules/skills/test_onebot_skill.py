@@ -100,15 +100,33 @@ class FakeCredentials:
         return SimpleNamespace(action=action, chat_flow=chat_flow) if self.allowed else None
 
 
+class FakeReviewer:
+    def __init__(self, decision: str = "allow", reason: str = "安全", *, error: Exception | None = None) -> None:
+        self.decision = decision
+        self.reason = reason
+        self.error = error
+        self.calls: list[list[dict]] = []
+
+    async def chat(self, messages: list[dict]) -> dict:
+        self.calls.append(messages)
+        if self.error is not None:
+            raise self.error
+        return {"content": json.dumps({"decision": self.decision, "reason": self.reason}, ensure_ascii=False)}
+
+
 def _skill(
     *,
     adapter: FakeAdapter | None = None,
     credentials: FakeCredentials | None = None,
+    reviewer: FakeReviewer | None = None,
+    auto_review: bool = True,
 ) -> OneBotSkill:
     return OneBotSkill(
         adapter=adapter if adapter is not None else FakeAdapter(),
         credential_manager=credentials,
         docs=_docs(),
+        reviewer=reviewer,
+        auto_review=auto_review,
     )
 
 
@@ -439,3 +457,108 @@ async def test_call_maps_adapter_exception_to_adapter_error() -> None:
     assert result["ok"] is False
     assert result["code"] == "ADAPTER_ERROR"
     assert "boom" in result["error"]
+
+
+# ── 自动审查 ──
+
+
+async def test_auto_review_allow_executes_without_credential() -> None:
+    adapter = FakeAdapter()
+    credentials = FakeCredentials(allowed=False)
+    reviewer = FakeReviewer("allow")
+    skill = _skill(adapter=adapter, credentials=credentials, reviewer=reviewer)
+
+    result = _parse(
+        await skill.execute(
+            "call",
+            {"action": "send_poke", "params": {"user_id": 1}, "pipeline_key": "group:123"},
+        )
+    )
+
+    assert result["ok"] is True
+    assert adapter.calls[0][0] == "send_poke"
+    assert len(reviewer.calls) == 1
+    assert credentials.calls == [("group:123", "send_poke", True)]
+
+
+async def test_auto_review_deny_offers_credential_override() -> None:
+    adapter = FakeAdapter()
+    reviewer = FakeReviewer("deny", "不允许批量踢人")
+    skill = _skill(adapter=adapter, credentials=FakeCredentials(), reviewer=reviewer)
+
+    result = _parse(
+        await skill.execute(
+            "call",
+            {"action": "set_group_kick", "params": {"group_id": 1, "user_id": 2}, "pipeline_key": "group:1"},
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "AUTO_REVIEW_DENIED"
+    assert "审查器误判" in result["error"]
+    assert result["request_tool"] == "credential__request"
+    assert adapter.calls == []
+
+
+async def test_credential_override_skips_reviewer() -> None:
+    adapter = FakeAdapter()
+    reviewer = FakeReviewer("deny")
+    skill = _skill(
+        adapter=adapter,
+        credentials=FakeCredentials(allowed=True),
+        reviewer=reviewer,
+    )
+
+    result = _parse(
+        await skill.execute(
+            "call",
+            {"action": "send_poke", "params": {"user_id": 1}, "pipeline_key": "group:123"},
+        )
+    )
+
+    assert result["ok"] is True
+    assert reviewer.calls == []
+
+
+async def test_auto_review_unavailable_falls_back_to_credential() -> None:
+    adapter = FakeAdapter()
+    reviewer = FakeReviewer(error=RuntimeError("review provider down"))
+    skill = _skill(adapter=adapter, credentials=FakeCredentials(), reviewer=reviewer)
+
+    result = _parse(
+        await skill.execute(
+            "call",
+            {"action": "send_poke", "params": {"user_id": 1}, "pipeline_key": "group:123"},
+        )
+    )
+
+    assert result["code"] == "AUTO_REVIEW_UNAVAILABLE"
+    assert result["request_tool"] == "credential__request"
+    assert adapter.calls == []
+
+
+async def test_auto_review_can_be_disabled() -> None:
+    adapter = FakeAdapter()
+    reviewer = FakeReviewer("allow")
+    skill = _skill(
+        adapter=adapter,
+        credentials=FakeCredentials(),
+        reviewer=reviewer,
+        auto_review=False,
+    )
+
+    result = _parse(
+        await skill.execute(
+            "call",
+            {"action": "send_poke", "params": {"user_id": 1}, "pipeline_key": "group:123"},
+        )
+    )
+
+    assert result["code"] == "CREDENTIAL_REQUIRED"
+    assert reviewer.calls == []
+
+
+def test_agent_onebot_defaults_to_auto_review() -> None:
+    from neobot_app.config.schemas.bot import BotConfig
+
+    assert BotConfig().agent.onebot.auto_review is True

@@ -152,3 +152,13 @@ language_id = "python"
 - [配置](../../app/src/neobot_app/config/schemas/bot.py)
 
 本功能不引入 Cordis 动态自修改、实验 Agent Teams，也不替换现有图片发送、文件下载、定时提醒及长期文件索引。
+
+## OneBot 通用动作自动审查
+
+onebot__call 的 yellow/red 动作默认走一次 AI 自动审查（agent.onebot.auto_review=true）：
+
+- 审查通过：直接执行，不再要求凭据。
+- 审查拒绝：返回 AUTO_REVIEW_DENIED，同时给出 credential__request 申请入口；agent 若认为审查器误判，可主动请管理员签发凭据覆盖，管理员签发后重试会直接消费凭据、跳过一次审查。
+- 审查器不可用/超时：回退旧的凭据门控，错误码 AUTO_REVIEW_UNAVAILABLE。
+- agent.onebot.auto_review=false：完全回到旧行为，所有非绿色动作必须先申请凭据。
+

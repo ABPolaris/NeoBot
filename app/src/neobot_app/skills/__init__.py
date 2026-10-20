@@ -203,8 +203,17 @@ def build_all_skills(
         )
 
     if "onebot" not in disabled and adapter is not None:
+        onebot_cfg = getattr(getattr(config, "agent", None), "onebot", None)
         skills_to_register.append(
-            OneBotSkill(adapter=adapter, credential_manager=credential_manager)
+            OneBotSkill(
+                adapter=adapter,
+                credential_manager=credential_manager,
+                reviewer=agent_provider,
+                auto_review=bool(getattr(onebot_cfg, "auto_review", True)),
+                review_timeout_seconds=float(
+                    getattr(onebot_cfg, "review_timeout_seconds", 30.0) or 30.0
+                ),
+            )
         )
 
     if "friend_management" not in disabled:

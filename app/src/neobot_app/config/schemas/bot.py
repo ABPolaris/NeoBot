@@ -1459,6 +1459,26 @@ class VisionDetect:
 
 
 @dataclass
+class AgentOneBot:
+    """OneBot 通用动作的安全审查配置。"""
+
+    auto_review: bool = field(
+        default=True,
+        metadata={
+            "description": (
+                "是否默认用 AI 自动审查 yellow/red 的 onebot__call 动作。"
+                "true=审查通过直接执行，拒绝时提示申请管理员凭据；"
+                "false=回到旧行为，所有非绿色动作都必须先申请凭据。"
+            )
+        },
+    )
+    review_timeout_seconds: float = field(
+        default=30.0,
+        metadata={"description": "自动审查单次模型调用超时（秒）"},
+    )
+
+
+@dataclass
 class AgentSkill:
     """Skill 系统全局配置。"""
 
@@ -1575,6 +1595,7 @@ class Agent:
     browser: AgentBrowser = field(default_factory=AgentBrowser)
     sandbox: AgentSandbox = field(default_factory=AgentSandbox)
     skill: AgentSkill = field(default_factory=AgentSkill)
+    onebot: AgentOneBot = field(default_factory=AgentOneBot)
     file_operation: AgentFileOperation = field(default_factory=AgentFileOperation)
     self_healing: AgentSelfHeal = field(default_factory=AgentSelfHeal)
     vision_detect: VisionDetect = field(default_factory=VisionDetect)
