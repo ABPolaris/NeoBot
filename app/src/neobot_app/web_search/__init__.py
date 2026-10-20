@@ -2,6 +2,7 @@
 
 from neobot_app.web_search.engine import (
     BingSearchEngine,
+    DeepSeekSearchEngine,
     DuckDuckGoSearchEngine,
     get_engine,
 )
@@ -11,6 +12,7 @@ from neobot_app.web_search.session import SearchSession
 
 __all__ = [
     "BingSearchEngine",
+    "DeepSeekSearchEngine",
     "DuckDuckGoSearchEngine",
     "get_engine",
     "SearchManager",

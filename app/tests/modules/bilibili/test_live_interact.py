@@ -6,6 +6,7 @@ import json
 import struct
 import time
 import zlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from neobot_app.bilibili import live_interact
@@ -17,9 +18,14 @@ from neobot_app.bilibili.live_interact import (
 )
 
 _ROOM_INFO = {
-    "room_info": {"room_id": 21452505, "title": "测试直播间"},
+    "room_info": {"room_id": 21452505, "title": "测试直播间", "live_status": 1},
     "anchor_info": {"base_info": {"uname": "主播"}},
 }
+_OFFLINE_ROOM_INFO = {
+    "room_info": {"room_id": 21452505, "title": "测试直播间", "live_status": 0},
+    "anchor_info": {"base_info": {"uname": "主播"}},
+}
+_NOW = datetime(2026, 5, 1, 9, 30, tzinfo=timezone.utc)
 
 
 class _FakeClient:
@@ -342,3 +348,156 @@ async def test_public_send_danmaku(tmp_path: Path) -> None:
     assert (await interactor.send_danmaku(0, "hi"))["ok"] is False
     assert (await interactor.send_danmaku(5440, "  "))["ok"] is False
     assert (await BilibiliLiveInteractor(None, data_dir=tmp_path).send_danmaku(5440, "hi"))["ok"] is False
+
+
+# ── 仅开播交互 ──
+
+
+async def test_offline_room_skips_auto_reply_and_manual_send(tmp_path: Path) -> None:
+    client = _FakeClient(room_info=_OFFLINE_ROOM_INFO)
+    provider = _FakeProvider()
+    interactor = BilibiliLiveInteractor(
+        client,
+        provider=provider,
+        bot_name="小助手",
+        data_dir=tmp_path,
+        cooldown_seconds=0.0,
+    )
+    await interactor.enable(5440)
+
+    await interactor._handle_danmu("5440", {"uid": 8, "name": "观众", "text": "@小助手 hi"})
+
+    assert client.sent == []
+    assert provider.messages == []
+    assert (await interactor.send_danmaku(5440, "hi")) == {
+        "ok": False,
+        "error": "未开播，不互动",
+    }
+    # 下播仍保留 WSS 收到的弹幕历史
+    assert interactor.get_history(5440)[0]["text"] == "@小助手 hi"
+
+
+async def test_live_status_is_cached_for_60_seconds(tmp_path: Path) -> None:
+    client = _FakeClient()
+    interactor = BilibiliLiveInteractor(client, data_dir=tmp_path)
+    await interactor.enable(5440)
+
+    assert await interactor.is_live(5440) is True
+    assert await interactor.is_live(5440) is True
+    assert client.room_calls == [5440, 5440]
+
+    interactor._live_cache["5440"] = (time.monotonic() - 61.0, False)
+    client.room_info = _OFFLINE_ROOM_INFO
+    assert await interactor.is_live(5440) is False
+    assert client.room_calls == [5440, 5440, 5440]
+
+
+# ── 房间历史 ──
+
+
+async def test_history_keeps_latest_50_danmu(tmp_path: Path) -> None:
+    interactor, _client, _provider = await _enabled(tmp_path, auto_reply=False)
+    for index in range(55):
+        await interactor._handle_danmu("5440", {"uid": index, "name": f"观众{index}", "text": f"弹幕{index}"})
+
+    history = interactor.get_history(5440, 100)
+    assert len(history) == 50
+    assert history[0]["text"] == "弹幕5"
+    assert history[-1]["text"] == "弹幕54"
+    assert set(history[0]) == {"uid", "name", "text", "time"}
+    assert len(history[0]["time"]) == 8
+    assert interactor.get_history(5440, 2)[-1]["text"] == "弹幕54"
+    assert interactor.get_history(9999) == []
+
+
+# ── 定时弹幕 ──
+
+
+async def test_daily_schedule_fires_once_and_persists(tmp_path: Path) -> None:
+    provider = _FakeProvider("来啦")
+    interactor, client, _ = await _enabled(tmp_path, provider=provider, auto_reply=False)
+    await interactor._handle_danmu("5440", {"uid": 8, "name": "观众", "text": "今天播什么"})
+
+    created = await interactor.schedule(5440, "9:30", "daily", "宣传新视频")
+    assert created["ok"] is True
+    assert created["schedule"]["time"] == "09:30"
+
+    fired = await interactor._scan_schedules(_NOW)
+    assert fired == [{"room_id": 5440, "schedule_id": created["schedule"]["id"], "text": "来啦"}]
+    assert client.sent == [(5440, "来啦")]
+    prompt = provider.messages[-1][1]["content"]
+    assert "宣传新视频" in prompt
+    assert "今天播什么" in prompt
+
+    assert await interactor._scan_schedules(_NOW) == []
+    assert len(client.sent) == 1
+
+    state = json.loads((tmp_path / "bilibili" / "live_interact.json").read_text(encoding="utf-8"))
+    saved = state["rooms"]["5440"]["schedules"][0]
+    assert saved["last_fired_date"] == "2026-05-01"
+    assert saved["recurrence"] == "daily"
+
+    restarted = BilibiliLiveInteractor(None, data_dir=tmp_path)
+    assert restarted.list_schedules(5440)[0]["prompt"] == "宣传新视频"
+
+    assert len(await interactor._scan_schedules(_NOW + timedelta(days=1))) == 1
+    assert len(client.sent) == 2
+
+
+async def test_schedule_skips_offline_and_does_not_backfill(tmp_path: Path) -> None:
+    client = _FakeClient(room_info=_OFFLINE_ROOM_INFO)
+    provider = _FakeProvider()
+    interactor = BilibiliLiveInteractor(client, provider=provider, bot_name="小助手", data_dir=tmp_path)
+    await interactor.enable(5440)
+    await interactor.schedule(5440, "09:30", "daily", "宣传")
+
+    assert await interactor._scan_schedules(_NOW) == []
+    assert client.sent == []
+    assert provider.messages == []
+    assert interactor.list_schedules(5440)[0]["last_fired_date"] == "2026-05-01"
+
+    # 同一时段内即使随后开播也不补发
+    client.room_info = _ROOM_INFO
+    interactor._live_cache.clear()
+    assert await interactor._scan_schedules(_NOW) == []
+    assert client.sent == []
+
+
+async def test_weekly_schedule_waits_seven_days(tmp_path: Path) -> None:
+    interactor, client, _ = await _enabled(tmp_path, provider=_FakeProvider("周更"), auto_reply=False)
+    await interactor.schedule(5440, "09:30", "weekly", "周更提醒")
+
+    assert len(await interactor._scan_schedules(_NOW)) == 1
+    assert await interactor._scan_schedules(_NOW + timedelta(days=3)) == []
+    assert len(await interactor._scan_schedules(_NOW + timedelta(days=7))) == 1
+    assert len(client.sent) == 2
+
+
+async def test_once_schedule_fires_only_once(tmp_path: Path) -> None:
+    interactor, client, _ = await _enabled(tmp_path, provider=_FakeProvider("一次"), auto_reply=False)
+    await interactor.schedule(5440, "09:30", "once", "只发一次")
+
+    assert len(await interactor._scan_schedules(_NOW)) == 1
+    assert await interactor._scan_schedules(_NOW + timedelta(days=1)) == []
+    assert len(client.sent) == 1
+
+
+async def test_schedule_validation_and_delete(tmp_path: Path) -> None:
+    interactor, _client, _provider = await _enabled(tmp_path)
+
+    assert (await interactor.schedule(9999, "09:30", "daily", "x"))["error"] == "房间未启用"
+    assert (await interactor.schedule(5440, "25:00", "daily", "x"))["error"] == "时间格式应为 HH:MM"
+    assert (await interactor.schedule(5440, "09:30", "hourly", "x"))["error"] == "recurrence 只能是 once/daily/weekly"
+    assert (await interactor.schedule(5440, "09:30", "daily", " "))["error"] == "prompt 不能为空"
+
+    created = await interactor.schedule(5440, "09:30", "daily", "x")
+    schedule_id = created["schedule"]["id"]
+    await interactor.enable(5440)  # 重新启用不丢定时弹幕
+    assert interactor.list_schedules(5440)[0]["id"] == schedule_id
+    assert (await interactor.delete_schedule(5440, "missing"))["ok"] is False
+    assert (await interactor.delete_schedule(5440, schedule_id)) == {
+        "ok": True,
+        "room_id": 5440,
+        "schedule_id": schedule_id,
+    }
+    assert interactor.list_schedules() == []

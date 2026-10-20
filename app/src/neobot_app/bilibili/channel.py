@@ -9,6 +9,7 @@ conversation_id 约定（CrossChatSkill 的 target_id）：
   dynamic:<oid>:<root>:<parent>       动态评论区（type=17）
   opus:<oid>:<root>:<parent>          图文动态（type=11）
   article:<oid>:<root>:<parent>       专栏（type=12）
+  live:<room_id>                      直播间弹幕（由 live_interactor 发送/读历史，仅开播时发送）
 """
 
 from __future__ import annotations
@@ -34,10 +35,16 @@ _MAX_HISTORY_LINES = 30
 class BilibiliCrossChatChannel:
     """CrossChatSkill 的 B站后端：send_task / get_history。"""
 
-    def __init__(self, client: Any = None, reply_engine: Any = None) -> None:
+    def __init__(
+        self,
+        client: Any = None,
+        reply_engine: Any = None,
+        live_interactor: Any = None,
+    ) -> None:
         # client 可以是 BilibiliClient 或 BilibiliService（调用时重新解析登录态）。
         self._client = client
         self._engine = reply_engine
+        self._live = live_interactor
 
     @property
     def available(self) -> bool:
@@ -50,9 +57,11 @@ class BilibiliCrossChatChannel:
         target = parse_conversation_id(conversation_id)
         if target is None:
             return False, "", (
-                "B站会话ID格式错误，应为 private:<uid> 或 "
+                "B站会话ID格式错误，应为 private:<uid>、live:<room_id> 或 "
                 "comment:<oid>:<root>:<parent>（可把点赞/回复目标写在 task 里）"
             )
+        if target["kind"] == "live":
+            return await self._send_live_task(target["room_id"], task)
         client = resolve_client(self._client)
         if client is None:
             return False, "", "B站未登录或客户端不可用"
@@ -83,15 +92,52 @@ class BilibiliCrossChatChannel:
         logger.info("B站跨聊天任务已发送", conversation_id=conversation_id, chars=len(reply))
         return True, reply, "已发送到B站"
 
+    async def _send_live_task(
+        self, room_id: int, task: str
+    ) -> tuple[bool, str, str]:
+        """把任务生成一条直播弹幕；未开播时既不生成也不发送。"""
+        if self._live is None:
+            return False, "", "B站直播交互器不可用"
+        if self._engine is None or not getattr(self._engine, "available", False):
+            return False, "", "B站回复引擎不可用"
+        try:
+            live = await self._live.is_live(room_id)
+        except Exception as exc:
+            logger.warning(
+                "B站直播开播状态读取失败",
+                room_id=room_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            live = False
+        if not live:
+            return False, "", "未开播，不互动"
+        history = await self.get_history(f"live:{room_id}", count=20)
+        reply = await self._engine.generate_task_reply(str(task or ""), history=history)
+        if reply is None:
+            return False, "", "B站侧决定不回应这个任务"
+        result = await self._live.send_danmaku(room_id, reply)
+        if not result.get("ok"):
+            detail = str(result.get("error") or "B站直播弹幕发送失败")
+            logger.warning(
+                "B站直播跨聊天投递失败", room_id=room_id, error=detail
+            )
+            return False, reply, detail
+        logger.info(
+            "B站直播跨聊天任务已发送", room_id=room_id, chars=len(reply)
+        )
+        return True, reply, "已发送到B站直播间"
+
     async def get_history(self, conversation_id: str, count: int = 20) -> str:
         """读取 B站对话内容，格式化成给 QQ agent 看的文本。"""
         target = parse_conversation_id(conversation_id)
         if target is None:
             return ""
+        limit = max(1, min(int(count or 20), _MAX_HISTORY_LINES * 2))
+        if target["kind"] == "live":
+            return self._render_live_history(target["room_id"], limit)
         client = resolve_client(self._client)
         if client is None:
             return ""
-        limit = max(1, min(int(count or 20), _MAX_HISTORY_LINES * 2))
         try:
             if target["kind"] == "private":
                 messages = await call_client(client.get_messages, target["uid"], size=limit)
@@ -106,6 +152,26 @@ class BilibiliCrossChatChannel:
             )
             return ""
 
+    def _render_live_history(self, room_id: int, limit: int) -> str:
+        if self._live is None:
+            return ""
+        try:
+            items = self._live.get_history(room_id, limit)
+        except Exception as exc:
+            logger.warning(
+                "B站直播历史读取失败",
+                room_id=room_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return ""
+        lines: list[str] = []
+        for item in items or []:
+            text = str(get_field(item, "text", "") or "").strip()
+            if text:
+                name = str(get_field(item, "name", "") or "观众")
+                lines.append(f"{name}:{text}")
+        return "\n".join(lines)
+
 
 def parse_conversation_id(conversation_id: Any) -> dict | None:
     """解析 conversation_id；非法格式返回 None。"""
@@ -117,6 +183,12 @@ def parse_conversation_id(conversation_id: Any) -> dict | None:
         except ValueError:
             return None
         return {"kind": "private", "uid": uid} if uid > 0 else None
+    if len(parts) == 2 and parts[0] == "live":
+        try:
+            room_id = int(parts[1])
+        except ValueError:
+            return None
+        return {"kind": "live", "room_id": room_id} if room_id > 0 else None
     if len(parts) == 4 and parts[0] in _COMMENT_KINDS:
         try:
             oid, root, parent = (int(parts[1]), int(parts[2]), int(parts[3]))

@@ -111,6 +111,11 @@ class SearchSession:
         browser_fallback: bool = True,
         browser_timeout_seconds: float = 8.0,
         engine_budgets: Optional[dict[str, float]] = None,
+        deepseek_enabled: Optional[bool] = None,
+        deepseek_api_key: str = "",
+        deepseek_base_url: str = "",
+        deepseek_timeout_seconds: float = 20.0,
+        deepseek_quota_cooldown_seconds: float = 300.0,
     ) -> None:
         budgets = dict(engine_budgets or {})
         budgets.setdefault("duckduckgo", 15.0)
@@ -121,6 +126,11 @@ class SearchSession:
             browser_channel=self._build_browser_channel(browser_timeout_seconds)
             if browser_fallback
             else None,
+            deepseek_enabled=deepseek_enabled,
+            deepseek_api_key=deepseek_api_key,
+            deepseek_base_url=deepseek_base_url,
+            deepseek_timeout_seconds=deepseek_timeout_seconds,
+            deepseek_quota_cooldown_seconds=deepseek_quota_cooldown_seconds,
         )
         self._max_rounds = max_rounds
         self._read_timeout = read_timeout
@@ -145,9 +155,16 @@ class SearchSession:
         """所有轮次的全部搜索结果，全局统一编号。"""
         return sorted(self._results_index.values(), key=lambda r: r.index)
 
-    async def search(self, query: str, num_results: int = 10) -> SearchResponse:
-        """执行新一轮搜索。"""
-        resp = await self._execute_search(query, num_results)
+    @property
+    def deepseek_available(self) -> bool:
+        """DeepSeek 搜索是否可用（额度不足/未配置/未启用时为 False）。"""
+        return self._manager.deepseek_available
+
+    async def search(
+        self, query: str, num_results: int = 10, *, engine: Optional[str] = None
+    ) -> SearchResponse:
+        """执行新一轮搜索。engine=None 走 auto（旧免费链路）。"""
+        resp = await self._execute_search(query, num_results, engine=engine)
         if resp.success:
             self._rounds.append(
                 SearchRound(round_num=self.current_round + 1, query=query, response=resp)
@@ -194,6 +211,12 @@ class SearchSession:
         unread = [r for r in self._results_index.values() if not r.content_fetched]
         read_count = len(self._results_index) - len(unread)
         lines.append(f"结果: {len(self._results_index)} 条 (已读 {read_count}, 未读 {len(unread)})")
+        lines.append(f"可用引擎: {', '.join(self._manager.available_engines)}")
+        if self._manager.deepseek_available:
+            lines.append('DeepSeek 搜索: 可用（engine="deepseek"，按次计费）')
+        else:
+            reason = self._manager.deepseek_unavailable_reason or "未配置"
+            lines.append(f"DeepSeek 搜索: 不可用，原因: {reason}")
         lines.append("")
 
         for rd in self._rounds:
@@ -217,6 +240,7 @@ class SearchSession:
         num_results: int = 10,
         variant_result_limit: int = 6,
         total_result_limit: int = 30,
+        engine: Optional[str] = None,
     ) -> SearchResponse:
         """智能研究模式：从多个角度自动生成查询变体，合并去重，仅计 1 轮。
 
@@ -249,7 +273,7 @@ class SearchSession:
             variants = resolved
 
         async def _query(q: str, n: int) -> SearchResponse:
-            return await self._execute_search(q, n)
+            return await self._execute_search(q, n, engine=engine)
 
         # 每个变体使用统一的 variant_result_limit
         variant_n = max(1, min(variant_result_limit, num_results))
@@ -294,7 +318,7 @@ class SearchSession:
         return primary
 
     async def _execute_search(
-        self, query: str, num_results: int
+        self, query: str, num_results: int, *, engine: Optional[str] = None
     ) -> SearchResponse:
         """核心搜索流水线：抓取 → 去重 → 多样性排序 → 编号。"""
         if self.current_round >= self._max_rounds:
@@ -307,7 +331,9 @@ class SearchSession:
             )
 
         fetch_count = min(num_results * 2, 30)
-        resp = await self._manager.search_with_fallback(query, fetch_count)
+        resp = await self._manager.search_with_fallback(
+            query, fetch_count, engine=engine
+        )
 
         if not resp.success:
             return resp

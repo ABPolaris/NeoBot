@@ -1,0 +1,263 @@
+"""BilibiliLiveSkill — B站直播间状态、弹幕、历史、自动回复与定时弹幕。"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from neobot_app.skills.base import SkillModule
+
+
+def _json(data: dict[str, Any]) -> str:
+    return json.dumps(data, ensure_ascii=False)
+
+
+def _room_id(args: dict[str, Any]) -> int:
+    try:
+        return int(args.get("room_id") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+class BilibiliLiveSkill(SkillModule):
+    """把 BilibiliLiveInteractor 暴露成 agent 工具。"""
+
+    @property
+    def name(self) -> str:
+        return "bilibili_live"
+
+    @property
+    def description(self) -> str:
+        return "B站直播间：开播状态、发弹幕、读弹幕历史、自动回复开关与定时弹幕"
+
+    @property
+    def instructions(self) -> str:
+        return (
+            "B站直播 Skill：先 status 查房间是否开播，再 send_danmaku / read_history。\n"
+            "所有写操作（发弹幕、定时弹幕）都以当前登录的B站账号发言，且仅在该房间开播时生效；"
+            "下播时返回「未开播，不互动」。enable/disable 控制房间监听与自动回复。"
+        )
+
+    def __init__(self, live_interactor: Any = None, service: Any = None) -> None:
+        self._live = live_interactor
+        self._service = service
+
+    def get_tools(self) -> list[dict]:
+        return [
+            self._tool_def(
+                "status",
+                "查看B站直播间是否在播、是否已启用、自动回复开关与定时弹幕。不传 room_id 时列出所有已启用房间。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号，可选"},
+                    },
+                    "required": [],
+                },
+            ),
+            self._tool_def(
+                "send_danmaku",
+                "以当前登录的B站账号在直播间发一条弹幕；仅开播时发送，下播返回未开播不互动。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号"},
+                        "text": {"type": "string", "description": "弹幕内容，尽量短"},
+                    },
+                    "required": ["room_id", "text"],
+                },
+            ),
+            self._tool_def(
+                "read_history",
+                "读取直播间最近弹幕（最多 50 条，按时间从旧到新）。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号"},
+                        "count": {"type": "integer", "description": "读取条数，默认 20", "default": 20},
+                    },
+                    "required": ["room_id"],
+                },
+            ),
+            self._tool_def(
+                "enable",
+                "启用直播间监听（写操作）。启用后自动回复会以当前B站账号发言。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号"},
+                        "auto_reply": {
+                            "type": "boolean",
+                            "description": "是否自动回复@本账号的弹幕，默认 true",
+                            "default": True,
+                        },
+                    },
+                    "required": ["room_id"],
+                },
+            ),
+            self._tool_def(
+                "disable",
+                "停用直播间监听并删除其定时弹幕（写操作）。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号"},
+                    },
+                    "required": ["room_id"],
+                },
+            ),
+            self._tool_def(
+                "schedule",
+                "给已启用直播间加定时弹幕（写操作）：到点且开播时，以当前B站账号发一条口语化弹幕。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号"},
+                        "time": {"type": "string", "description": "本地时间 HH:MM"},
+                        "recurrence": {
+                            "type": "string",
+                            "enum": ["once", "daily", "weekly"],
+                            "description": "once=只发一次，daily=每天，weekly=每 7 天",
+                        },
+                        "prompt": {"type": "string", "description": "这条弹幕要说的事或主题"},
+                    },
+                    "required": ["room_id", "time", "recurrence", "prompt"],
+                },
+            ),
+            self._tool_def(
+                "list_schedules",
+                "列出定时弹幕；不传 room_id 时列出所有已启用房间。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号，可选"},
+                    },
+                    "required": [],
+                },
+            ),
+            self._tool_def(
+                "delete_schedule",
+                "删除一条定时弹幕（写操作）。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号"},
+                        "schedule_id": {"type": "string", "description": "list_schedules 返回的任务 ID"},
+                    },
+                    "required": ["room_id", "schedule_id"],
+                },
+            ),
+        ]
+
+    async def execute(self, tool_name: str, args: dict[str, Any]) -> str:
+        live = self._live
+        if live is None:
+            return _json({"ok": False, "error": "B站直播交互器不可用"})
+        try:
+            if tool_name == "status":
+                return await self._status(live, args)
+            if tool_name == "send_danmaku":
+                return await self._send_danmaku(live, args)
+            if tool_name == "read_history":
+                return self._read_history(live, args)
+            if tool_name == "enable":
+                return await self._enable(live, args)
+            if tool_name == "disable":
+                return await self._disable(live, args)
+            if tool_name == "schedule":
+                return await self._schedule(live, args)
+            if tool_name == "list_schedules":
+                return self._list_schedules(live, args)
+            if tool_name == "delete_schedule":
+                return await self._delete_schedule(live, args)
+        except Exception as exc:
+            return _json({"ok": False, "error": f"B站直播操作失败：{type(exc).__name__}: {exc}"})
+        return _json({"ok": False, "error": f"未知工具: {tool_name}"})
+
+    async def _status(self, live: Any, args: dict[str, Any]) -> str:
+        rid = _room_id(args)
+        if args.get("room_id") not in (None, "") and rid <= 0:
+            return _json({"ok": False, "error": "房间号无效"})
+        rooms = {int(item.get("room_id") or 0): item for item in live.list_rooms()}
+        if rid <= 0:
+            result = []
+            for room_id, room in rooms.items():
+                result.append(
+                    {
+                        "room_id": room_id,
+                        "name": str(room.get("name") or ""),
+                        "auto_reply": bool(room.get("auto_reply")),
+                        "live": await live.is_live(room_id),
+                        "schedules": live.list_schedules(room_id),
+                    }
+                )
+            return _json({"ok": True, "rooms": result})
+        room = rooms.get(rid) or {}
+        return _json(
+            {
+                "ok": True,
+                "room_id": rid,
+                "enabled": rid in rooms,
+                "name": str(room.get("name") or ""),
+                "auto_reply": bool(room.get("auto_reply", False)),
+                "live": await live.is_live(rid),
+                "schedules": live.list_schedules(rid),
+            }
+        )
+
+    async def _send_danmaku(self, live: Any, args: dict[str, Any]) -> str:
+        rid = _room_id(args)
+        text = str(args.get("text") or "").strip()
+        result = await live.send_danmaku(rid, text)
+        return _json(
+            {
+                "ok": bool(result.get("ok")),
+                "room_id": rid,
+                "text": text,
+                "error": str(result.get("error") or ""),
+                "note": "将以当前B站账号发言",
+            }
+        )
+
+    def _read_history(self, live: Any, args: dict[str, Any]) -> str:
+        rid = _room_id(args)
+        if rid <= 0:
+            return _json({"ok": False, "error": "房间号无效"})
+        try:
+            count = int(args.get("count") or 20)
+        except (TypeError, ValueError):
+            count = 20
+        items = live.get_history(rid, count)
+        return _json({"ok": True, "room_id": rid, "count": len(items), "history": items})
+
+    async def _enable(self, live: Any, args: dict[str, Any]) -> str:
+        rid = _room_id(args)
+        result = await live.enable(rid, auto_reply=bool(args.get("auto_reply", True)))
+        payload = dict(result)
+        payload["note"] = "写操作：启用后自动回复将以当前B站账号发言"
+        return _json(payload)
+
+    async def _disable(self, live: Any, args: dict[str, Any]) -> str:
+        rid = _room_id(args)
+        result = await live.disable(rid)
+        payload = dict(result)
+        payload["note"] = "写操作：停用后不再监听该房间"
+        return _json(payload)
+
+    async def _schedule(self, live: Any, args: dict[str, Any]) -> str:
+        rid = _room_id(args)
+        result = await live.schedule(
+            rid,
+            str(args.get("time") or ""),
+            str(args.get("recurrence") or ""),
+            str(args.get("prompt") or ""),
+        )
+        payload = dict(result)
+        payload["note"] = "写操作：到点将以当前B站账号发弹幕"
+        return _json(payload)
+
+    def _list_schedules(self, live: Any, args: dict[str, Any]) -> str:
+        raw = args.get("room_id")
+        rid = _room_id(args)
+        if raw not in (None, "") and rid <= 0:
+            return _json({"ok": False, "error": "房间号无效"})
+        return _json({"ok": True, "schedules": live.list_schedules(rid or None)})
+
+    async def _delete_schedule(self, live: Any, args: dict[str, Any]) -> str:
+        rid = _room_id(args)
+        result = await live.delete_schedule(rid, str(args.get("schedule_id") or "").strip())
+        payload = dict(result)
+        payload["note"] = "写操作：删除后该定时弹幕不再发送"
+        return _json(payload)

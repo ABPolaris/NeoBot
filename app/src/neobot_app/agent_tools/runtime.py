@@ -49,7 +49,8 @@ def result_json(value: Any) -> Any:
 class AgentToolRuntime:
     def __init__(self, sandbox: Any, *, state_dir: Path, credential_manager: Any = None,
                  provider: Any = None, vision_provider: Any = None, skill_manager: Any = None,
-                 notification_hub: Any = None, config: AgentToolsConfig | None = None) -> None:
+                 notification_hub: Any = None, config: AgentToolsConfig | None = None,
+                 web_search_config: dict[str, Any] | None = None) -> None:
         from neobot_app.agent_tools.delegation import ChildAgentTools
         from neobot_app.agent_tools.goal_driver import GoalDriver
         from neobot_app.agent_tools.lsp import LspTools
@@ -72,7 +73,7 @@ class AgentToolRuntime:
         self.state = StateTools(state_dir / "state", approve=self._approve_plan, max_goal_rounds=self.config.max_goal_rounds)
         self.files = AgentFileTools(sandbox)
         self.processes = ProcessTools(self.workspace, completion_callback=self._notify)
-        self.web = WebTools()
+        self.web = WebTools(search_kwargs=web_search_config or {})
         self.ptc = PtcRunner()
         from neobot_app.agent_tools.lsp_defaults import default_python_lsp_servers
         servers = default_python_lsp_servers() if self.config.lsp_enabled else {}

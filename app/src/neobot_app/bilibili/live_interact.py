@@ -4,7 +4,11 @@
 再连 B站弹幕 WebSocket（`wss://host:wss_port/sub`）收 DANMU_MSG，按需调用
 provider 生成一句极短回复，再由 BilibiliClient.send_danmaku 发出。
 
-启用房间持久化在 `<DATA_DIR>/bilibili/live_interact.json`；start() 恢复连接。
+只参与开播阶段：房间 live_status 缓存 60 秒，自动回复/定时弹幕/手动弹幕都先查；
+下播时 WSS 可以继续收弹幕（保留历史），但不生成、不发送。
+
+启用房间与定时弹幕持久化在 `<DATA_DIR>/bilibili/live_interact.json`；
+每个房间保留最近 50 条弹幕供 agent / 跨聊天读取。start() 恢复连接与定时循环。
 不 import streaming_parser，也不依赖它的订阅/轮询。
 """
 
@@ -18,8 +22,10 @@ import struct
 import time
 import zlib
 from collections import defaultdict, deque
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import aiohttp
 
@@ -45,6 +51,13 @@ _WS_HEALTHY_SECONDS = 60.0
 #: 单房间每分钟最多自动回复条数（冷却之外的硬上限）。
 _MAX_REPLIES_PER_MINUTE = 3
 _REPLY_WINDOW_SECONDS = 60.0
+#: 房间开播状态缓存时长；避免每条弹幕都打一次直播间信息接口。
+_LIVE_STATUS_TTL_SECONDS = 60.0
+#: 每房间保留的最近弹幕条数。
+_MAX_HISTORY = 50
+#: 定时弹幕检查间隔。
+_SCHEDULE_CHECK_SECONDS = 30.0
+_RECURRENCES = frozenset({"once", "daily", "weekly"})
 
 
 def encode_packet(op: int, body: bytes = b"", protover: int = 1) -> bytes:
@@ -127,6 +140,9 @@ class BilibiliLiveInteractor:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._reply_times: dict[str, deque[float]] = defaultdict(deque)
         self._last_reply_at: dict[str, float] = {}
+        self._history: dict[str, deque[dict[str, Any]]] = {}
+        self._live_cache: dict[str, tuple[float, bool]] = {}
+        self._schedule_task: asyncio.Task[None] | None = None
         self._loaded = False
         self._running = False
 
@@ -140,6 +156,8 @@ class BilibiliLiveInteractor:
         self._running = True
         for room_id in list(self._rooms):
             self._start_task(room_id)
+        if self._schedule_task is None or self._schedule_task.done():
+            self._schedule_task = asyncio.create_task(self._schedule_loop(), name="bilibili-live-schedules")
         self._logger.info("B站直播交互器已启动", rooms=len(self._rooms))
 
     async def stop(self) -> None:
@@ -147,11 +165,18 @@ class BilibiliLiveInteractor:
         self._running = False
         tasks = list(self._tasks.items())
         self._tasks.clear()
+        schedule_task = self._schedule_task
+        self._schedule_task = None
         for _room_id, task in tasks:
             task.cancel()
+        if schedule_task is not None:
+            schedule_task.cancel()
         for _room_id, task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        if schedule_task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await schedule_task
         self._logger.info("B站直播交互器已停止")
 
     @property
@@ -182,16 +207,25 @@ class BilibiliLiveInteractor:
         anchor = data.get("anchor_info") if isinstance(data, dict) else None
         base_info = anchor.get("base_info") if isinstance(anchor, dict) else None
         name = str(base_info.get("uname") or "") if isinstance(base_info, dict) else ""
+        existing = self._rooms.get(str(rid)) or {}
         room = {
             "real_room_id": real_room_id,
             "name": name,
             "auto_reply": bool(auto_reply),
+            # 重新启用不应丢掉已配置的定时弹幕。
+            "schedules": list(existing.get("schedules") or []),
         }
         self._rooms[str(rid)] = room
         self._save()
         self._start_task(str(rid))
         self._logger.info("B站直播房间已启用", room_id=rid, auto_reply=room["auto_reply"])
-        return {"ok": True, "room_id": rid, **room}
+        return {
+            "ok": True,
+            "room_id": rid,
+            "real_room_id": real_room_id,
+            "name": name,
+            "auto_reply": room["auto_reply"],
+        }
 
     async def disable(self, room_id: int) -> dict[str, Any]:
         """停用房间并删除持久化状态。"""
@@ -232,7 +266,7 @@ class BilibiliLiveInteractor:
         return {"ok": True, "room_id": rid, "auto_reply": room["auto_reply"]}
 
     async def send_danmaku(self, room_id: int, text: str) -> dict[str, Any]:
-        """手动发一条直播弹幕（不受自动回复开关影响）。"""
+        """手动发一条直播弹幕（不受自动回复开关影响；下播时不发送）。"""
         rid = _to_int(room_id)
         message = str(text or "").strip()
         if rid <= 0 or not message:
@@ -240,6 +274,8 @@ class BilibiliLiveInteractor:
         client = self._get_client()
         if client is None:
             return {"ok": False, "error": "B站未登录或客户端不可用"}
+        if not await self.is_live(rid):
+            return {"ok": False, "error": "未开播，不互动"}
         try:
             sent = await call_client(client.send_danmaku, rid, message)
         except Exception as exc:
@@ -252,6 +288,116 @@ class BilibiliLiveInteractor:
         if not sent:
             return {"ok": False, "error": "B站直播弹幕发送失败"}
         return {"ok": True, "error": ""}
+
+    # ── 开播状态与房间历史 ──
+
+    async def is_live(self, room_id: int, *, refresh: bool = False) -> bool:
+        """房间是否在播；live_status 缓存 60 秒，接口不可用时按未开播处理。"""
+        rid = _to_int(room_id)
+        if rid <= 0:
+            return False
+        key = str(rid)
+        now = time.monotonic()
+        cached = self._live_cache.get(key)
+        if not refresh and cached is not None and now - cached[0] < _LIVE_STATUS_TTL_SECONDS:
+            return cached[1]
+        live = False
+        client = self._get_client()
+        if client is not None:
+            try:
+                data = await call_client(client.get_live_room_info, rid)
+            except Exception as exc:
+                self._logger.warning(
+                    "B站直播间开播状态读取失败",
+                    room_id=rid,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                data = {}
+            room_info = data.get("room_info") if isinstance(data, dict) else None
+            live = _to_int(get_field(room_info, "live_status", 0)) == 1
+        self._live_cache[key] = (now, live)
+        return live
+
+    def get_history(self, room_id: int, count: int = _MAX_HISTORY) -> list[dict[str, Any]]:
+        """房间最近弹幕（旧→新），最多 50 条。"""
+        rid = _to_int(room_id)
+        limit = max(1, min(_to_int(count) or _MAX_HISTORY, _MAX_HISTORY))
+        items = self._history.get(str(rid))
+        if not items:
+            return []
+        return [dict(item) for item in list(items)[-limit:]]
+
+    # ── 定时弹幕 ──
+
+    async def schedule(self, room_id: int, time: str, recurrence: str, prompt: str) -> dict[str, Any]:
+        """为已启用房间添加定时弹幕；到点且房间在播才发送。"""
+        rid = _to_int(room_id)
+        if rid <= 0:
+            return {"ok": False, "error": "房间号无效"}
+        self._load()
+        room = self._rooms.get(str(rid))
+        if room is None:
+            return {"ok": False, "error": "房间未启用"}
+        clock = _normalize_clock(time)
+        if clock is None:
+            return {"ok": False, "error": "时间格式应为 HH:MM"}
+        rec = str(recurrence or "").strip().lower()
+        if rec not in _RECURRENCES:
+            return {"ok": False, "error": "recurrence 只能是 once/daily/weekly"}
+        text = str(prompt or "").strip()
+        if not text:
+            return {"ok": False, "error": "prompt 不能为空"}
+        record = {
+            "id": uuid4().hex[:12],
+            "time": clock,
+            "recurrence": rec,
+            "prompt": text,
+            "last_fired_date": "",
+        }
+        room.setdefault("schedules", []).append(record)
+        self._save()
+        self._logger.info(
+            "B站直播定时弹幕已创建",
+            room_id=rid,
+            schedule_id=record["id"],
+            time=clock,
+            recurrence=rec,
+        )
+        return {"ok": True, "room_id": rid, "schedule": dict(record)}
+
+    def list_schedules(self, room_id: int | None = None) -> list[dict[str, Any]]:
+        """列出定时弹幕；room_id 为空时列出所有已启用房间。"""
+        self._load()
+        if room_id is None:
+            room_ids = sorted(self._rooms, key=_to_int)
+        else:
+            rid = _to_int(room_id)
+            room_ids = [str(rid)] if str(rid) in self._rooms else []
+        items: list[dict[str, Any]] = []
+        for key in room_ids:
+            rid = _to_int(key)
+            for record in self._rooms[key].get("schedules") or []:
+                items.append({"room_id": rid, **record})
+        return items
+
+    async def delete_schedule(self, room_id: int, schedule_id: str) -> dict[str, Any]:
+        """删除一条定时弹幕。"""
+        rid = _to_int(room_id)
+        sid = str(schedule_id or "").strip()
+        if rid <= 0 or not sid:
+            return {"ok": False, "error": "房间号或定时任务 ID 不能为空"}
+        self._load()
+        room = self._rooms.get(str(rid))
+        if room is None:
+            return {"ok": False, "error": "房间未启用"}
+        schedules = room.get("schedules") or []
+        kept = [item for item in schedules if str(item.get("id")) != sid]
+        if len(kept) == len(schedules):
+            return {"ok": False, "error": "定时弹幕不存在"}
+        room["schedules"] = kept
+        self._save()
+        self._logger.info("B站直播定时弹幕已删除", room_id=rid, schedule_id=sid)
+        return {"ok": True, "room_id": rid, "schedule_id": sid}
 
     # ── WebSocket ──
 
@@ -351,6 +497,7 @@ class BilibiliLiveInteractor:
 
     async def _handle_danmu(self, room_id: str, danmu: dict[str, Any]) -> None:
         room_id = str(room_id)
+        self._record_history(room_id, danmu)
         room = self._rooms.get(room_id)
         if room is None or not room.get("auto_reply", True):
             return
@@ -367,23 +514,44 @@ class BilibiliLiveInteractor:
             return
         if not self._reply_allowed(room_id):
             return
+        if not await self.is_live(_to_int(room_id)):
+            return
         reply = await self._generate_reply(text)
         if not reply:
             return
-        try:
-            sent = await call_client(client.send_danmaku, _to_int(room_id), reply)
-        except Exception as exc:
-            self._logger.warning(
-                "B站直播自动回复发送失败",
-                room_id=room_id,
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            return
-        if not sent:
-            self._logger.warning("B站直播自动回复发送失败", room_id=room_id)
+        if not await self._post_danmaku(client, _to_int(room_id), reply, action="自动回复"):
             return
         self._record_reply(room_id)
         self._logger.info("B站直播已自动回复", room_id=room_id, chars=len(reply))
+
+    def _record_history(self, room_id: str, danmu: dict[str, Any]) -> None:
+        text = str(danmu.get("text") or "").strip()
+        if not text:
+            return
+        entry = {
+            "uid": _to_int(danmu.get("uid")),
+            "name": str(danmu.get("name") or ""),
+            "text": text,
+            "time": datetime.now().astimezone().strftime("%H:%M:%S"),
+        }
+        room_history = self._history.get(room_id)
+        if room_history is None:
+            room_history = self._history[room_id] = deque(maxlen=_MAX_HISTORY)
+        room_history.append(entry)
+
+    async def _post_danmaku(self, client: Any, room_id: int, text: str, *, action: str) -> bool:
+        try:
+            sent = await call_client(client.send_danmaku, room_id, text)
+        except Exception as exc:
+            self._logger.warning(
+                f"B站直播{action}发送失败",
+                room_id=room_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return False
+        if not sent:
+            self._logger.warning(f"B站直播{action}发送失败", room_id=room_id)
+        return bool(sent)
 
     def _mentions_bot(self, text: str) -> bool:
         if not self._bot_name:
@@ -415,6 +583,32 @@ class BilibiliLiveInteractor:
             {"role": "system", "content": system},
             {"role": "user", "content": text},
         ]
+        return clean_reply(
+            await self._chat(messages, error_label="B站直播回复生成失败"),
+            self._max_reply_chars,
+        )
+
+    async def _generate_schedule_danmaku(self, prompt: str, context: str) -> str:
+        system = (
+            f"你在B站直播间以「{self._bot_name or '主播助手'}」的身份主动发一条直播弹幕。"
+            "要求：B站直播弹幕，短（一句话以内）、口语化、像真人随口说的，不刷屏；"
+            "不要发链接，不要使用 markdown，不要解释你在执行任务。"
+        )
+        content = f"这条弹幕要说的事：{prompt}"
+        if context:
+            content += f"\n最近的直播间弹幕：\n{context}"
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": content},
+        ]
+        return clean_reply(
+            await self._chat(messages, error_label="B站直播定时弹幕生成失败"),
+            self._max_reply_chars,
+        )
+
+    async def _chat(self, messages: list[dict[str, str]], *, error_label: str) -> str:
+        if self._provider is None:
+            return ""
         try:
             response = self._provider.chat(messages)
             if inspect.isawaitable(response):
@@ -422,10 +616,90 @@ class BilibiliLiveInteractor:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._logger.warning("B站直播回复生成失败", error=f"{type(exc).__name__}: {exc}")
+            self._logger.warning(error_label, error=f"{type(exc).__name__}: {exc}")
             return ""
         content = response.get("content", "") if isinstance(response, dict) else get_field(response, "content", "")
-        return clean_reply(content, self._max_reply_chars)
+        return str(content or "")
+
+    # ── 定时弹幕循环 ──
+
+    async def _schedule_loop(self) -> None:
+        while self._running:
+            try:
+                await self._scan_schedules()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._logger.warning("B站直播定时弹幕检查失败", error=f"{type(exc).__name__}: {exc}")
+            await asyncio.sleep(_SCHEDULE_CHECK_SECONDS)
+
+    @staticmethod
+    def _is_schedule_due(schedule: dict[str, Any], now: datetime) -> bool:
+        if str(schedule.get("time") or "") != now.strftime("%H:%M"):
+            return False
+        last = str(schedule.get("last_fired_date") or "")
+        recurrence = str(schedule.get("recurrence") or "")
+        if recurrence == "once":
+            return not last
+        if recurrence == "daily":
+            return last != now.date().isoformat()
+        if recurrence == "weekly":
+            try:
+                last_date = date.fromisoformat(last)
+            except ValueError:
+                return True
+            return (now.date() - last_date).days >= 7
+        return False
+
+    async def _scan_schedules(self, now: datetime | None = None) -> list[dict[str, Any]]:
+        """检查到点的定时弹幕；到点即消耗本时段，下播/失败都不在同一时段重试。"""
+        current = now or datetime.now().astimezone()
+        fired: list[dict[str, Any]] = []
+        for room_id, room in list(self._rooms.items()):
+            for schedule in list(room.get("schedules") or []):
+                if not self._is_schedule_due(schedule, current):
+                    continue
+                schedule["last_fired_date"] = current.date().isoformat()
+                self._save()
+                rid = _to_int(room_id)
+                if not await self.is_live(rid):
+                    self._logger.info(
+                        "B站直播间未开播，跳过定时弹幕",
+                        room_id=room_id,
+                        schedule_id=schedule.get("id"),
+                    )
+                    continue
+                text = await self._generate_schedule_danmaku(
+                    str(schedule.get("prompt") or ""),
+                    self._format_history(rid, 10),
+                )
+                if not text:
+                    continue
+                client = self._get_client()
+                if client is None:
+                    continue
+                if not await self._post_danmaku(client, rid, text, action="定时弹幕"):
+                    continue
+                fired.append(
+                    {
+                        "room_id": rid,
+                        "schedule_id": schedule.get("id"),
+                        "text": text,
+                    }
+                )
+                self._logger.info(
+                    "B站直播已发送定时弹幕",
+                    room_id=room_id,
+                    schedule_id=schedule.get("id"),
+                    chars=len(text),
+                )
+        return fired
+
+    def _format_history(self, room_id: int, count: int) -> str:
+        return "\n".join(
+            f"[{item.get('time')}] {item.get('name') or '观众'}:{item.get('text') or ''}"
+            for item in self.get_history(room_id, count)
+        )
 
     # ── 内部：任务与持久化 ──
 
@@ -466,27 +740,65 @@ class BilibiliLiveInteractor:
             room_id = _to_int(key)
             if room_id <= 0 or not isinstance(value, dict):
                 continue
+            schedules = []
+            for raw in value.get("schedules") or []:
+                schedule = _normalize_schedule(raw)
+                if schedule is not None:
+                    schedules.append(schedule)
             self._rooms[str(room_id)] = {
                 "real_room_id": _to_int(value.get("real_room_id")) or room_id,
                 "name": str(value.get("name") or ""),
                 "auto_reply": bool(value.get("auto_reply", True)),
+                "schedules": schedules,
             }
 
     def _save(self) -> None:
-        payload = {
-            "rooms": {
-                room_id: {
-                    "real_room_id": _to_int(room.get("real_room_id")) or _to_int(room_id),
-                    "name": str(room.get("name") or ""),
-                    "auto_reply": bool(room.get("auto_reply", True)),
-                }
-                for room_id, room in sorted(self._rooms.items(), key=lambda item: _to_int(item[0]))
+        rooms: dict[str, dict[str, Any]] = {}
+        for room_id, room in sorted(self._rooms.items(), key=lambda item: _to_int(item[0])):
+            entry: dict[str, Any] = {
+                "real_room_id": _to_int(room.get("real_room_id")) or _to_int(room_id),
+                "name": str(room.get("name") or ""),
+                "auto_reply": bool(room.get("auto_reply", True)),
             }
-        }
+            schedules = [dict(item) for item in room.get("schedules") or []]
+            if schedules:
+                entry["schedules"] = schedules
+            rooms[room_id] = entry
+        payload = {"rooms": rooms}
         try:
             atomic_write_text(self._path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         except OSError as exc:
             self._logger.warning("B站直播交互状态保存失败", error=str(exc))
+
+
+def _normalize_clock(value: Any) -> str | None:
+    parts = str(value or "").strip().split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if not (0 <= hour < 24 and 0 <= minute < 60):
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _normalize_schedule(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    clock = _normalize_clock(value.get("time"))
+    recurrence = str(value.get("recurrence") or "").strip().lower()
+    prompt = str(value.get("prompt") or "").strip()
+    if clock is None or recurrence not in _RECURRENCES or not prompt:
+        return None
+    return {
+        "id": str(value.get("id") or uuid4().hex[:12]),
+        "time": clock,
+        "recurrence": recurrence,
+        "prompt": prompt,
+        "last_fired_date": str(value.get("last_fired_date") or ""),
+    }
 
 
 def _to_int(value: Any) -> int:

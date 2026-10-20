@@ -20,6 +20,7 @@ from neobot_app.bilibili.private_monitor import BilibiliPrivateMonitor
 from neobot_app.bilibili.reply_engine import BilibiliReplyEngine
 from neobot_app.bilibili.service import BilibiliService
 from neobot_app.skills.bilibili_link import BilibiliLinkSkill
+from neobot_app.skills.bilibili_live import BilibiliLiveSkill
 from neobot_app.skills.bilibili_memory import BilibiliMemorySkill
 from neobot_app.skills.bilibili_tools import (
     BilibiliSearchSkill,
@@ -86,7 +87,6 @@ class BilibiliRuntime:
             bot_data=bot_data,
         )
         self.diary_skill = BilibiliDiarySkill(self.diary)
-        self.channel = BilibiliCrossChatChannel(self.service, self.engine)
         self.live_interactor = BilibiliLiveInteractor(
             self.service,
             provider=provider,
@@ -99,6 +99,9 @@ class BilibiliRuntime:
                 getattr(cfg, "live_interaction_max_reply_chars", 40) or 40
             ),
             at_only=bool(getattr(cfg, "live_interaction_at_only", True)),
+        )
+        self.channel = BilibiliCrossChatChannel(
+            self.service, self.engine, live_interactor=self.live_interactor
         )
         self._diary_task: asyncio.Task[None] | None = None
 
@@ -482,6 +485,10 @@ def build_bilibili_skills(
                 service=runtime.service,
                 archive_service=archive_service,
                 uow_factory=uow_factory,
+            ),
+            lambda: BilibiliLiveSkill(
+                live_interactor=runtime.live_interactor,
+                service=runtime.service,
             ),
         ):
             try:

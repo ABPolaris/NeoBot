@@ -27,6 +27,8 @@
 | bilibili_video__watch_video(identifier,max_chars,include_comments) | 看视频：站点字幕优先，无字幕走 ASR 转写；默认最多 3000 字符，返回 source=site/asr，可选热门评论；超长全文自动存档案 |
 | bilibili_video__read_video_transcript(identifier) | 按 BV 号读取 watch_video 存档的完整转写（转写超过 3000 字符时才有），用于按需读取 |
 | bilibili_video__video_comments(identifier,page,order) | 拉视频评论（热门/最新） |
+| bilibili_video__comment_tree(identifier,root_rpid,limit) | 读评论区树（顶级评论 + 楼中楼；root_rpid 可只展开某根评论） |
+| bilibili_video__read_bili_messages(limit,include_at) | 读「回复我的」+「@我的」通知，归一化后给 agent 自己判断；只读 |
 | bilibili_video__comment_video(identifier,text,root,parent) | 以当前登录账号给视频发评论/楼中楼回复（写操作，确认意图后调用） |
 | bilibili_video__like_video(identifier) | 给视频点赞（写操作） |
 | bilibili_video__like_comment(identifier,rpid) | 给视频评论点赞（写操作） |
@@ -61,10 +63,23 @@
 - 状态文件：data/bilibili/live_interact.json，重启自动恢复。
 - 直播监听（开播/下播通知）在 streaming_parser 插件里，和这里完全分开。
 
+定时弹幕与 agent 操作（bilibili_live 技能工具）：
+- bilibili_live__status / send_danmaku / read_history
+- bilibili_live__enable / disable
+- bilibili_live__schedule / list_schedules / delete_schedule：本地时间 HH:MM，recurrence=once/daily/weekly；到点且房间在播才生成并发送，同一时段不重复；下播跳过。
+- 所有自动回复、定时弹幕、手动发弹幕都先检查开播状态，下播不互动；只在开播阶段参与。
+- 跨聊天可通过 target_kind=bilibili + live:<room_id> 把任务派给直播间（同样仅开播时发送）。
+
 ## 直播监听
 
 B站直播监听已内嵌为官方内置插件 streaming_parser（默认开启，命令见 docs/04-功能文档/B站直播监听.md）。
 B站视频搜索/看视频走上面的 agent 工具（QQ 侧触发），直播插件负责开播/下播通知，两者独立。
+
+## 直播能力边界（审计结论）
+
+- 直播间 ASR：未启用。ASR 只用于视频（media.py 的字幕/音频转写）；直播弹幕链路只有文本。
+- 直播间画面获取：未启用。没有直播 playurl/截帧/vision；当前只有弹幕 WSS。按需截帧技术可行（调研实测单帧 0.9–1.7s），但尚未接入。
+- 直播事件目前只处理 DANMU_MSG；礼物/SC/进场/舰长等事件未接入。
 
 ## 风险
 

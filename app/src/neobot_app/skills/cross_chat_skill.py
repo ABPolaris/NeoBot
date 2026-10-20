@@ -138,7 +138,7 @@ class CrossChatSkill(SkillModule):
             "## B站通道\n"
             "target_kind=bilibili 时，target_id 用 B站会话ID：\n"
             "  private:<UID> — B站私信\n"
-            "  comment:<oid>:<root>:<parent> — 视频评论区楼中楼（dynamic/opus/article 同理）\n"
+            "  comment:<oid>:<root>:<parent> — 视频评论区楼中楼（dynamic/opus/article 同理）\n  live:<room_id> — B站直播间弹幕（仅开播时发送，读历史用同一 target_id）\n"
             "B站侧没有常驻 agent：通道会把任务改写成一句符合人设的B站发言再发出，"
             "mode=wait 时把生成的发言放进 reply。\n\n"
             "注意：收到跨聊天回复回传时，应直接回复，不要再次委托本 skill。"

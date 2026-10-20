@@ -34,6 +34,9 @@ def _build_search_tool() -> ToolDefinition:
             "name": "search",
             "description": (
                 "执行联网搜索，返回带编号的搜索结果列表。"
+                "默认 engine=auto 使用免费的旧实现（Bing/DuckDuckGo），质量较低但免费；"
+                "对结果质量要求高时可显式 engine='deepseek'（DeepSeek 付费 API，按次计费）；"
+                "DeepSeek 额度不足会自动回退旧实现并告知。"
                 "强烈建议使用 mode 参数进行多角度研究搜索，一次搜索会从多个变体查询并合并结果，"
                 "比多次普通关键词搜索高效得多。"
                 "可用 mode：encyclopedia（百科/百度百科/wiki）、community（知乎/贴吧/论坛/NGA）、"
@@ -60,6 +63,16 @@ def _build_search_tool() -> ToolDefinition:
                             "news（新闻类）、official（官方类，查官网）、"
                             "video（视频类）、academic（学术类）。"
                             "不填则仅做普通关键词搜索，易返回低相关度结果"
+                        ),
+                    },
+                    "engine": {
+                        "type": "string",
+                        "enum": ["auto", "bing", "duckduckgo", "deepseek"],
+                        "default": "auto",
+                        "description": (
+                            "搜索实现。默认 auto 使用免费的旧实现（Bing/DDG），质量较低但免费；"
+                            "高质量要求可显式 engine='deepseek'（DeepSeek 付费 API，按次计费）；"
+                            "DeepSeek 额度不足/Key 无效会自动回退旧实现并告知"
                         ),
                     },
                 },
@@ -98,7 +111,10 @@ def _build_status_tool() -> ToolDefinition:
         "type": "function",
         "function": {
             "name": "status",
-            "description": "查看当前搜索会话状态，包括已完成轮次、已读/未读结果统计",
+            "description": (
+                "查看当前搜索会话状态，包括已完成轮次、已读/未读结果统计，"
+                "以及 DeepSeek 搜索是否可用（额度不足/未配置时显示不可用原因）"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -120,6 +136,11 @@ class WebSearchExecutor:
         browser_fallback: bool = True,
         browser_timeout_seconds: float = 8.0,
         engine_budgets: dict[str, float] | None = None,
+        deepseek_enabled: bool | None = None,
+        deepseek_api_key: str = "",
+        deepseek_base_url: str = "",
+        deepseek_timeout_seconds: float = 20.0,
+        deepseek_quota_cooldown_seconds: float = 300.0,
     ) -> None:
         self._engines = engines or ["bing", "duckduckgo"]
         self._max_rounds = max_rounds
@@ -128,6 +149,11 @@ class WebSearchExecutor:
         self._browser_fallback = browser_fallback
         self._browser_timeout_seconds = browser_timeout_seconds
         self._engine_budgets = engine_budgets
+        self._deepseek_enabled = deepseek_enabled
+        self._deepseek_api_key = deepseek_api_key
+        self._deepseek_base_url = deepseek_base_url
+        self._deepseek_timeout_seconds = deepseek_timeout_seconds
+        self._deepseek_quota_cooldown_seconds = deepseek_quota_cooldown_seconds
         self._session: SearchSession | None = None
 
     def _get_session(self) -> SearchSession:
@@ -138,6 +164,11 @@ class WebSearchExecutor:
                 browser_fallback=self._browser_fallback,
                 browser_timeout_seconds=self._browser_timeout_seconds,
                 engine_budgets=self._engine_budgets,
+                deepseek_enabled=self._deepseek_enabled,
+                deepseek_api_key=self._deepseek_api_key,
+                deepseek_base_url=self._deepseek_base_url,
+                deepseek_timeout_seconds=self._deepseek_timeout_seconds,
+                deepseek_quota_cooldown_seconds=self._deepseek_quota_cooldown_seconds,
             )
         return self._session
 
@@ -163,6 +194,10 @@ class WebSearchExecutor:
         num_results = int(args.get("num_results", 10))
         num_results = max(1, min(num_results, self._preview_pages_limit))
         mode = args.get("mode")
+        engine = str(args.get("engine") or "auto").strip().lower()
+        if engine not in ("auto", "bing", "duckduckgo", "deepseek"):
+            engine = "auto"
+        engine_arg = None if engine == "auto" else engine
 
         if mode and mode != "raw":
             try:
@@ -172,11 +207,14 @@ class WebSearchExecutor:
                     num_results=num_results,
                     variant_result_limit=self._variant_result_limit,
                     total_result_limit=self._preview_pages_limit,
+                    engine=engine_arg,
                 )
             except Exception as e:
                 return f"[错误] 研究搜索失败: {e}"
         else:
-            resp = await session.search(query, num_results=num_results)
+            resp = await session.search(
+                query, num_results=num_results, engine=engine_arg
+            )
 
         if not resp.success:
             return f"[搜索失败] {resp.error}"
@@ -233,6 +271,11 @@ def build_web_search_package(
     max_rounds: int = 5,
     preview_pages_limit: int = 30,
     variant_result_limit: int = 6,
+    deepseek_enabled: bool | None = None,
+    deepseek_api_key: str = "",
+    deepseek_base_url: str = "",
+    deepseek_timeout_seconds: float = 20.0,
+    deepseek_quota_cooldown_seconds: float = 3600.0,
 ) -> ToolPackage | None:
     """构建联网搜索工具包。
 
@@ -242,6 +285,11 @@ def build_web_search_package(
         max_rounds: 最大搜索轮次，默认 5
         preview_pages_limit: 单次搜索返回结果总数上限，默认 30
         variant_result_limit: 研究模式每个变体查询的最大返回结果数，默认 6
+        deepseek_enabled: 是否允许显式 engine="deepseek"（付费，默认关闭）
+        deepseek_api_key: DeepSeek API Key（复用 env 的 DeepSeek_APIKey）
+        deepseek_base_url: DeepSeek API 根地址；空串用官方默认
+        deepseek_timeout_seconds: DeepSeek 单次请求超时
+        deepseek_quota_cooldown_seconds: 402/401 后隐藏多久
 
     Returns:
         ToolPackage 实例，或 None（当 enabled=False）
@@ -254,6 +302,11 @@ def build_web_search_package(
         max_rounds=max_rounds,
         preview_pages_limit=preview_pages_limit,
         variant_result_limit=variant_result_limit,
+        deepseek_enabled=deepseek_enabled,
+        deepseek_api_key=deepseek_api_key,
+        deepseek_base_url=deepseek_base_url,
+        deepseek_timeout_seconds=deepseek_timeout_seconds,
+        deepseek_quota_cooldown_seconds=deepseek_quota_cooldown_seconds,
     )
 
     tools = [
