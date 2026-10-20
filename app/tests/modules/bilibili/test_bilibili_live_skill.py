@@ -64,6 +64,8 @@ def test_skill_exposes_expected_tools() -> None:
         "schedule",
         "list_schedules",
         "delete_schedule",
+        "recent_events",
+        "record_clip",
         "snapshot",
         "transcribe",
     }
