@@ -58,6 +58,8 @@ def test_comment_system_prompt_has_bilibili_rules() -> None:
     assert "B站" in system
     assert "不是QQ" in system
     assert "不懂装懂" in system
+    assert "听着xx" in system
+    assert "实际上xx" in system
     assert "调调" in system
     assert "[SKIP]" in system
     assert "楼中楼" in system
@@ -173,3 +175,31 @@ def test_diary_prompt_truncates_material() -> None:
     )
 
     assert "素材过长已截断" in user
+
+
+def test_comment_prompt_renders_video_context() -> None:
+    ctx = _comment_context()
+    ctx.video_context = "标题：视频标题\n来源：site\n摘要：字幕摘要"
+
+    _, user = build_comment_prompt(ctx)
+
+    assert "<相关视频>" in user
+    assert "标题：视频标题" in user
+    assert "来源：site" in user
+    assert "字幕摘要" in user
+
+
+def test_private_prompt_renders_video_context() -> None:
+    ctx = PrivateMessageContext(
+        bot_name="Neo",
+        sender_name="王五",
+        sender_uid=55,
+        current_message="看这个",
+        video_context="标题：私信里的视频\n来源：asr\n摘要：语音转写",
+    )
+
+    _, user = build_private_prompt(ctx)
+
+    assert "<相关视频>" in user
+    assert "私信里的视频" in user
+    assert "语音转写" in user

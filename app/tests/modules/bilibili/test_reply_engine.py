@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import neobot_app.bilibili.reply_engine as reply_engine_module
@@ -274,3 +275,122 @@ async def test_task_reply_generation() -> None:
     system, user = provider.calls[0]
     assert "跨聊天任务" in system["content"]
     assert "告诉对方晚上开黑" in user["content"]
+
+
+# ── 视频上下文增强 ──
+
+_VIDEO_URL = "https://www.bilibili.com/video/BV1xx411c7mD"
+
+
+class FakeVideoService:
+    def __init__(self, result=None, *, delay: float = 0.0) -> None:
+        self.result = result or {
+            "ok": True,
+            "title": "视频标题",
+            "source": "site",
+            "transcript": "字幕摘要",
+            "url": _VIDEO_URL,
+        }
+        self.delay = delay
+        self.calls: list[tuple] = []
+
+    async def watch(self, identifier, max_chars=6000, include_comments=0):
+        self.calls.append((identifier, max_chars, include_comments))
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        return self.result
+
+
+async def test_comment_video_link_enriches_prompt() -> None:
+    video = FakeVideoService()
+    provider = FakeProvider("好")
+    engine = _engine(provider, video_service=video)
+    ctx = _comment_ctx()
+    ctx.comment_tree = [
+        CommentNode(rpid=7, uid=77, uname="甲", content=f"看这个 {_VIDEO_URL}")
+    ]
+
+    result = await engine.generate_comment_reply(ctx)
+
+    assert result == "好"
+    assert video.calls == [("BV1xx411c7mD", 3000, 0)]
+    assert "标题：视频标题" in ctx.video_context
+    assert "来源：site" in ctx.video_context
+    _, user = provider.calls[0]
+    assert "<相关视频>" in user["content"]
+    assert "视频标题" in user["content"]
+    assert "字幕摘要" in user["content"]
+
+
+async def test_private_video_link_enriches_prompt() -> None:
+    video = FakeVideoService(
+        {
+            "ok": True,
+            "title": "私信里的视频",
+            "source": "asr",
+            "transcript": "语音转写",
+            "url": "https://www.bilibili.com/video/av170001",
+        }
+    )
+    provider = FakeProvider("在的")
+    engine = _engine(provider, video_service=video)
+    ctx = PrivateMessageContext(
+        sender_uid=55,
+        sender_name="王五",
+        current_message="看看 https://www.bilibili.com/video/av170001 这个",
+    )
+
+    result = await engine.generate_private_reply(ctx)
+
+    assert result == "在的"
+    assert video.calls == [("https://www.bilibili.com/video/av170001", 3000, 0)]
+    _, user = provider.calls[0]
+    assert "<相关视频>" in user["content"]
+    assert "私信里的视频" in user["content"]
+    assert "asr" in user["content"]
+
+
+async def test_video_enrichment_timeout_degrades(monkeypatch) -> None:
+    monkeypatch.setattr(reply_engine_module, "_VIDEO_ENRICH_TIMEOUT_SECONDS", 0.01)
+    video = FakeVideoService(delay=0.2)
+    provider = FakeProvider("好")
+    engine = _engine(provider, video_service=video)
+    ctx = _comment_ctx()
+    ctx.comment_tree = [
+        CommentNode(rpid=7, uid=77, uname="甲", content="看 BV1xx411c7mD")
+    ]
+
+    result = await engine.generate_comment_reply(ctx)
+
+    assert result == "好"
+    assert video.calls
+    assert ctx.video_context == ""
+    _, user = provider.calls[0]
+    assert "<相关视频>" not in user["content"]
+
+
+async def test_video_error_result_is_ignored() -> None:
+    video = FakeVideoService({"ok": False, "error": "没有字幕"})
+    provider = FakeProvider("好")
+    engine = _engine(provider, video_service=video)
+    ctx = _comment_ctx()
+    ctx.comment_tree = [
+        CommentNode(rpid=7, uid=77, uname="甲", content="看 BV1xx411c7mD")
+    ]
+
+    result = await engine.generate_comment_reply(ctx)
+
+    assert result == "好"
+    assert video.calls
+    _, user = provider.calls[0]
+    assert "<相关视频>" not in user["content"]
+
+
+async def test_no_video_link_does_not_call_watch() -> None:
+    video = FakeVideoService()
+    provider = FakeProvider("好")
+
+    await _engine(provider, video_service=video).generate_comment_reply(_comment_ctx())
+
+    assert video.calls == []
+    assert "<相关视频>" not in provider.calls[0][1]["content"]

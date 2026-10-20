@@ -1,9 +1,11 @@
 """B站私信轮询回复（默认关闭）。
 
 复用原 private_monitor 的会话轮询语义，但直接接 reply_engine，不再经过
-ReplyOrchestrator：每 poll_interval_seconds（默认 1800s）扫一遍最近会话，
-对每个会话里新到的、非自己的文本消息生成一次回复并调用 client.send_message。
-每个会话每轮最多回一次（多条新消息合并进上下文），失败按指数退避。
+ReplyOrchestrator：每 poll_interval_seconds（默认 1800s）扫一遍最近
+session_check_count（默认 50）个会话，对每个会话里新到的、非自己的文本消息
+生成一次回复并调用 client.send_message。每轮最多回复 max_replies_per_poll
+（默认 50）个会话，没轮到的下一轮继续；每个会话每轮最多回一次（多条新消息
+合并进上下文），失败按指数退避。
 """
 
 from __future__ import annotations
@@ -52,11 +54,10 @@ class BilibiliPrivateMonitor:
         *,
         enabled: bool = False,
         poll_interval_seconds: float = 1800.0,
-        max_replies_per_poll: int = 3,
+        max_replies_per_poll: int = 50,
         reply_cooldown_seconds: float = 60.0,
-        session_check_count: int = 20,
+        session_check_count: int = 50,
         message_size: int = 20,
-        start_time: int | None = None,
         max_seen: int = 2000,
     ) -> None:
         self._client = client
@@ -65,10 +66,12 @@ class BilibiliPrivateMonitor:
         self._poll_interval = max(1.0, float(poll_interval_seconds or 1800.0))
         self._max_per_poll = max(1, int(max_replies_per_poll or 1))
         self._cooldown = max(0.0, float(reply_cooldown_seconds or 0.0))
-        self._session_check_count = max(1, int(session_check_count or 20))
+        self._session_check_count = max(1, int(session_check_count or 50))
         self._message_size = max(1, int(message_size or 20))
-        self._start_time = int(start_time if start_time is not None else time.time())
         self._processed = RecentIds(max_seen)
+        #: 已知没处理完的会话（发送失败/异常/本轮被截断），供 status 摘要。
+        self._pending_talkers: set[int] = set()
+        self._processed_count = 0
         self._last_reply_at: dict[int, float] = {}
         self._failures = 0
         self._next_poll_at = 0.0
@@ -86,7 +89,9 @@ class BilibiliPrivateMonitor:
             "poll_interval_seconds": float(
                 getattr(cfg, "poll_interval_seconds", 1800) or 1800
             ),
-            "max_replies_per_poll": int(getattr(cfg, "max_replies_per_poll", 3) or 3),
+            "max_replies_per_poll": int(
+                getattr(cfg, "max_replies_per_poll", 50) or 50
+            ),
             "reply_cooldown_seconds": float(
                 getattr(cfg, "reply_cooldown_seconds", 60.0) or 0.0
             ),
@@ -140,6 +145,8 @@ class BilibiliPrivateMonitor:
             "failures": self._failures,
             "next_poll_interval_seconds": self.next_poll_interval,
             "last_error": self._last_error,
+            "pending_sessions": len(self._pending_talkers),
+            "processed_messages": self._processed_count,
         }
 
     # ── 轮询 ──
@@ -180,8 +187,18 @@ class BilibiliPrivateMonitor:
             return 0
 
         replied = 0
-        for session in sessions or []:
+        session_list = list(sessions or [])
+        for index, session in enumerate(session_list):
             if replied >= self._max_per_poll:
+                # 没轮到的会话记入待处理摘要，下一轮继续（已回复的会被去重跳过）。
+                logger.info(
+                    "B站私信本轮达到上限，剩余会话留待下轮",
+                    remaining=len(session_list) - index,
+                )
+                for rest in session_list[index:]:
+                    rest_id = int(get_field(rest, "talker_id", 0) or 0)
+                    if rest_id:
+                        self._pending_talkers.add(rest_id)
                 break
             talker_id = int(get_field(session, "talker_id", 0) or 0)
             if not talker_id or not self._cooldown_ok(talker_id):
@@ -194,6 +211,7 @@ class BilibiliPrivateMonitor:
                 self._failures += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"
                 logger.exception("B站私信处理异常", talker_id=talker_id)
+                self._pending_talkers.add(talker_id)
                 continue
             if sent:
                 replied += 1
@@ -207,16 +225,18 @@ class BilibiliPrivateMonitor:
         )
         messages = list(messages or [])
         if not messages:
+            self._pending_talkers.discard(talker_id)
             return False
         my_uid = int(getattr(client, "my_uid", 0) or 0)
         ordered = sorted(messages, key=lambda msg: int(get_field(msg, "timestamp", 0) or 0))
         pending: list[PrivateMessageEvent] = []
         for msg in ordered:
             event = _message_event(msg, talker_id, my_uid)
-            if event is None or self._is_stale(event) or event.msg_key in self._processed:
+            if event is None or event.msg_key in self._processed:
                 continue
             pending.append(event)
         if not pending:
+            self._pending_talkers.discard(talker_id)
             return False
         latest = pending[-1]
         history = _history(ordered, my_uid)
@@ -227,22 +247,25 @@ class BilibiliPrivateMonitor:
         )
         text = await self._engine.generate_private_reply(ctx)
         if text is None:
-            for event in pending:
-                self._processed.add(event.msg_key)
+            self._mark_processed(pending)
+            self._pending_talkers.discard(talker_id)
             return False
         sent = await call_client(client.send_message, latest.talker_id, text)
         if not sent:
             self._failures += 1
+            self._pending_talkers.add(talker_id)
             logger.warning("B站私信发送失败", talker_id=talker_id)
             return False
-        for event in pending:
-            self._processed.add(event.msg_key)
+        self._mark_processed(pending)
+        self._pending_talkers.discard(talker_id)
         self._last_reply_at[talker_id] = time.monotonic()
         logger.info("B站私信已回复", talker_id=talker_id, chars=len(text))
         return True
 
-    def _is_stale(self, event: PrivateMessageEvent) -> bool:
-        return bool(event.timestamp) and event.timestamp < self._start_time
+    def _mark_processed(self, events: list[PrivateMessageEvent]) -> None:
+        for event in events:
+            if self._processed.add(event.msg_key):
+                self._processed_count += 1
 
     def _cooldown_ok(self, talker_id: int) -> bool:
         if self._cooldown <= 0:
