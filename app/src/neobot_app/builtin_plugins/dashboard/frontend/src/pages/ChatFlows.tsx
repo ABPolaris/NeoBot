@@ -206,7 +206,7 @@ export default function ChatFlows() {
   const list = useQuery(QK.chatFlows, () => api.chatFlows(), { interval: POLL.chatFlows });
   const flows = useMemo(() => list.data?.items || [], [list.data]);
   const [selected, setSelected] = useState('');
-  const [tab, setTab] = useState<'full' | 'quick'>('full');
+  const [tab, setTab] = useState<'full' | 'quick'>('quick');
   /** 历史列表是否只看当前聊天流 */
   const [onlyCurrent, setOnlyCurrent] = useState(true);
   /** 历史里被手动切换到的 seq；null = 跟随最新一份 */
