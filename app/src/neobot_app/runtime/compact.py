@@ -165,3 +165,62 @@ def archive_compact_guide() -> str:
         "For this archive, map the sections to durable archive facts; keep all section "
         "headings and write (none) when a section is empty.\n"
     )
+
+
+async def compact_archive_record(
+    provider: Any,
+    text: str,
+    *,
+    target_chars: int,
+    table_name: str = "",
+    key: str = "",
+    timeout: float = 90.0,
+) -> str | None:
+    """用 compact 模板直接压缩一条档案；返回候选文本，失败返回 None。
+
+    这是档案压缩的兜底/直写路径：不依赖工具调用，候选必须缩短且 <= target。
+    """
+    if provider is None or not callable(getattr(provider, "chat", None)):
+        return None
+    source = str(text or "").strip()
+    target = int(target_chars or 0)
+    if not source or target <= 0 or len(source) <= target:
+        return None
+    prompt = (
+        f"Archive table: {table_name}\nArchive key: {key}\n"
+        f"Source chars: {len(source)}\nTarget chars: {target}\n"
+        "Output ONLY the complete compressed archive record. Do not call tools, do not use "
+        "code fences, and do not explain. Keep every durable fact (names, dates, numbers, "
+        "preferences, decisions, unresolved items), merge duplicates and drop repetition; "
+        "never invent facts. The output MUST be <= target chars and shorter than the source.\n"
+        f"\nRecord:\n{source}"
+    )
+    messages = [
+        {"role": "system", "content": "You are the archive compaction engine for NeoBot."},
+        {"role": "user", "content": f"{COMPACT_INSTRUCTIONS}\n\n---\n{prompt}"},
+    ]
+    try:
+        import asyncio
+
+        response = await asyncio.wait_for(provider.chat(messages), timeout=timeout)
+    except Exception:
+        return None
+    content = response.get("content", "") if isinstance(response, dict) else ""
+    candidate = str(content or "").strip()
+    fence = chr(96) * 3
+    if candidate.startswith(fence):
+        lines = candidate.splitlines()
+        if lines and lines[0].startswith(fence):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == fence:
+            lines = lines[:-1]
+        candidate = "\n".join(lines).strip()
+    min_chars = min(100, max(20, target // 10))
+    if (
+        not candidate
+        or len(candidate) < min_chars
+        or len(candidate) > target
+        or len(candidate) >= len(source)
+    ):
+        return None
+    return candidate
