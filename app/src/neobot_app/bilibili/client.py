@@ -49,6 +49,7 @@ _VIDEO_COIN_URL = f"{API_BASE}/x/web-interface/coin/add"
 _VIDEO_SHARE_URL = f"{API_BASE}/x/web-interface/share/add"
 _FAV_FOLDER_LIST_URL = f"{API_BASE}/x/v3/fav/folder/created/list-all"
 _FAV_RESOURCE_DEAL_URL = f"{API_BASE}/x/v3/fav/resource/deal"
+_RELATION_MODIFY_URL = f"{API_BASE}/x/relation/modify"
 _COMMENT_ACTION_URL = f"{API_BASE}/x/v2/reply/action"
 
 LIVE_API_BASE = "https://api.live.bilibili.com"
@@ -830,6 +831,31 @@ class BilibiliClient:
             self._on_write_error("直播弹幕发送", exc)
             return False
         self._logger.info(f"B站直播弹幕已发送: room={real_room_id}")
+        return True
+
+    def follow_user(self, uid: int, *, follow: bool = True) -> bool:
+        """关注/取消关注一个 B站用户；失败返回 False（不抛）。"""
+        if not self._require_login("关注用户"):
+            return False
+        target = _to_int(uid)
+        if target <= 0 or target == self.my_uid:
+            self._logger.warning(f"B站关注用户失败：无效 UID {uid!r}")
+            return False
+        form: dict[str, Any] = {
+            "fid": target,
+            "act": 1 if follow else 2,
+            "re_src": 11,
+            "csrf": self._bili_jct,
+        }
+        self._rate_limit_wait()
+        try:
+            self._fetch("POST", _RELATION_MODIFY_URL, data=form)
+        except BilibiliError as exc:
+            self._on_write_error("关注用户", exc)
+            return False
+        self._logger.info(
+            "B站关注用户成功" if follow else "B站取消关注成功", uid=target
+        )
         return True
 
     # ── 用户空间 ──
