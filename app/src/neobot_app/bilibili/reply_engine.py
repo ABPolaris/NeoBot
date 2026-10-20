@@ -12,6 +12,7 @@ import re
 from typing import Any
 
 from neobot_app.bilibili._compat import call_client, get_field
+from neobot_app.bilibili.tool_reply import run_tool_reply
 from neobot_app.bilibili.prompts import (
     CommentContext,
     CommentNode,
@@ -85,6 +86,7 @@ class BilibiliReplyEngine:
         max_private_chars: int = 500,
         max_task_chars: int = 300,
         timeout_seconds: float = 60.0,
+        flow_registry: Any = None,
     ) -> None:
         self._provider = provider
         self._archive = archive_service
@@ -98,6 +100,7 @@ class BilibiliReplyEngine:
         self._max_private_chars = max(0, int(max_private_chars))
         self._max_task_chars = max(0, int(max_task_chars))
         self._timeout_seconds = float(timeout_seconds)
+        self._flow_registry = flow_registry
 
     @property
     def available(self) -> bool:
@@ -113,7 +116,15 @@ class BilibiliReplyEngine:
         ctx.other_name = ctx.other_name or self._other_name
         await self._enrich_comment(ctx)
         system, user = build_comment_prompt(ctx)
-        return await self._generate(system, user, self._max_comment_chars)
+        key = f"bilibili_comment:{ctx.target_oid}"
+        return await self._generate(
+            system,
+            user,
+            self._max_comment_chars,
+            pipeline_key=key,
+            conversation_kind="bilibili_comment",
+            conversation_id=str(ctx.target_oid),
+        )
 
     async def generate_private_reply(self, ctx: PrivateMessageContext) -> str | None:
         """生成私信回复；返回 None 表示不回复。"""
@@ -123,35 +134,79 @@ class BilibiliReplyEngine:
         ctx.other_name = ctx.other_name or self._other_name
         await self._enrich_private(ctx)
         system, user = build_private_prompt(ctx)
-        return await self._generate(system, user, self._max_private_chars)
+        key = f"bilibili_private:{ctx.sender_uid}"
+        return await self._generate(
+            system,
+            user,
+            self._max_private_chars,
+            pipeline_key=key,
+            conversation_kind="bilibili_private",
+            conversation_id=str(ctx.sender_uid),
+        )
 
-    async def generate_task_reply(self, task: str, *, history: str = "") -> str | None:
+    async def generate_task_reply(
+        self, task: str, *, history: str = "", live: bool = False
+    ) -> str | None:
         """跨聊天任务：生成一句要发到 B站 的回复。"""
         system, user = build_task_prompt(
             task,
             history=history,
+            live=live,
             bot_name=self._bot_name,
             bot_uid=self._bot_uid,
             bot_data=self._bot_data,
             other_name=self._other_name,
         )
-        return await self._generate(system, user, self._max_task_chars)
+        return await self._generate(
+            system,
+            user,
+            self._max_task_chars,
+            pipeline_key="bilibili_task",
+            conversation_kind="bilibili_task",
+            conversation_id="task",
+        )
 
     # ── LLM 调用 ──
 
-    async def _generate(self, system: str, user: str, max_chars: int) -> str | None:
+    async def _generate(
+        self,
+        system: str,
+        user: str,
+        max_chars: int,
+        *,
+        pipeline_key: str = "",
+        conversation_kind: str = "",
+        conversation_id: str = "",
+    ) -> str | None:
         if self._provider is None:
             return None
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
+        if self._flow_registry is not None and pipeline_key:
+            try:
+                model = str(getattr(self._provider, "model", "") or "")
+                messages = [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ]
+                self._flow_registry.record_prompt(
+                    pipeline_key,
+                    system_prompt=system,
+                    model=model,
+                    conversation_kind=conversation_kind,
+                    conversation_id=conversation_id,
+                )
+                self._flow_registry.record_request(
+                    pipeline_key, messages=messages, model=model, iteration=1
+                )
+            except Exception:
+                pass
         try:
-            chat = self._provider.chat(messages)
-            if self._timeout_seconds > 0:
-                response = await asyncio.wait_for(chat, timeout=self._timeout_seconds)
-            else:
-                response = await chat
+            reply = await run_tool_reply(
+                self._provider,
+                system,
+                user,
+                max_chars=max_chars,
+                timeout=self._timeout_seconds,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -160,11 +215,13 @@ class BilibiliReplyEngine:
                 error=f"{type(exc).__name__}: {exc}",
             )
             return None
-        await self._record_usage(response)
-        content = response.get("content") if isinstance(response, dict) else get_field(
-            response, "content", ""
-        )
-        return clean_reply(content, max_chars) or None
+        try:
+            await self._record_usage(
+                {"extensions": {"usage": reply.usage or {}}}
+            )
+        except Exception:
+            pass
+        return reply.text
 
     async def _record_usage(self, response: Any) -> None:
         """记录本次调用的 usage；provider 未提供 usage 时也落一条 0 token 记录。"""
@@ -217,6 +274,7 @@ class BilibiliReplyEngine:
         if profile is None:
             return
         ctx.sender_remark = ctx.sender_remark or str(profile.get("remark") or "")
+        ctx.sender_profile = ctx.sender_profile or str(profile.get("profile") or "")
         memories = [
             str(profile.get("bilibili_memory") or ""),
             str(profile.get("qq_memory") or ""),
