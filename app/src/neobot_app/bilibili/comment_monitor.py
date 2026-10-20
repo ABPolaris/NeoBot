@@ -11,7 +11,9 @@ reply_engine / client。
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +25,7 @@ from neobot_app.bilibili._compat import (
     resolve_client,
 )
 from neobot_app.bilibili.prompts import CommentContext, CommentNode
+from neobot_app.utils.atomic import atomic_write_text
 from neobot_app.utils.logger import get_module_logger
 
 logger = get_module_logger("bilibili.comment_monitor")
@@ -135,6 +138,7 @@ class BilibiliCommentMonitor:
         reply_cooldown_seconds: float = 60.0,
         feed_limit: int = 20,
         max_seen: int = 2000,
+        data_dir: Path | None = None,
     ) -> None:
         # client 既可以是 BilibiliClient，也可以是 BilibiliService（每轮重新解析，
         # 登录状态在运行期会变）。
@@ -146,6 +150,13 @@ class BilibiliCommentMonitor:
         self._cooldown = max(0.0, float(reply_cooldown_seconds or 0.0))
         self._feed_limit = max(1, int(feed_limit or 20))
         self._processed = RecentIds(max_seen)
+        # data_dir 为空时不落盘（测试/纯内存用法）；生产由 runtime 传 DATA_DIR。
+        self._state_path = (
+            Path(data_dir) / "bilibili" / "comment_replies.json"
+            if data_dir is not None
+            else None
+        )
+        self._load_state()
         #: 本轮没轮到的待回复事件，按 dedupe_key 去重，下一轮优先处理。
         self._pending: dict[str, CommentEvent] = {}
         self._last_reply_at: dict[str, float] = {}
@@ -184,6 +195,7 @@ class BilibiliCommentMonitor:
             return
         if self._task is not None and not self._task.done():
             return
+        self._load_state()
         self._running = True
         self._next_poll_at = 0.0
         self._task = asyncio.create_task(self._loop())
@@ -199,6 +211,7 @@ class BilibiliCommentMonitor:
                 await task
             except asyncio.CancelledError:
                 pass
+        self._save_state()
         logger.info("B站评论监控器已停止")
 
     @property
@@ -241,6 +254,35 @@ class BilibiliCommentMonitor:
                 self._last_error = f"{type(exc).__name__}: {exc}"
                 logger.exception("B站评论轮询异常")
             await asyncio.sleep(1.0)
+
+    def _load_state(self) -> None:
+        path = self._state_path
+        if path is None or not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("B站评论已回复记忆读取失败，按空状态启动", path=str(path))
+            return
+        for key in data.get("processed") or []:
+            text = str(key or "").strip()
+            if text:
+                self._processed.add(text)
+
+    def _save_state(self) -> None:
+        path = self._state_path
+        if path is None:
+            return
+        try:
+            atomic_write_text(
+                path,
+                json.dumps(
+                    {"version": 1, "processed": self._processed.keys()},
+                    ensure_ascii=False,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("B站评论已回复记忆保存失败", path=str(path), error=str(exc))
 
     async def poll_once(self) -> int:
         """轮询一次，返回本轮成功回复的条数。"""
@@ -360,6 +402,7 @@ class BilibiliCommentMonitor:
         if text is None:
             # 模型明确不回复/生成失败：这条通知直接记掉，避免每轮重复生成烧 token。
             self._processed.add(event.dedupe_key)
+            self._save_state()
             logger.debug("B站评论跳过回复", oid=event.oid, rpid=event.parent_id)
             return False
         sent = await call_client(
@@ -375,6 +418,7 @@ class BilibiliCommentMonitor:
             logger.warning("B站评论回复发送失败", oid=event.oid, rpid=event.parent_id)
             return False
         self._processed.add(event.dedupe_key)
+        self._save_state()
         self._last_reply_at[f"{event.oid}:{event.root_id}"] = time.monotonic()
         logger.info(
             "B站评论已回复",
