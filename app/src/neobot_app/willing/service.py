@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from neobot_adapter.model.message import GroupMessage, PrivateMessage
+from neobot_adapter.model.message import GroupMessage, MessageSegment, PrivateMessage
 from neobot_contracts.ports.logging import Logger, NullLogger
 
 from neobot_app.config.schemas.bot import BotConfig
@@ -70,6 +70,76 @@ class WillingService:
             queue=queue,
             queue_key=queue_key,
             reply_mode=reply_mode,
+        )
+        return self._manager.evaluate(context)
+
+    def evaluate_live(
+        self,
+        *,
+        room_id: int,
+        uid: int,
+        name: str,
+        text: str,
+        observed_messages: tuple[str, ...] = (),
+    ) -> WillingDecision:
+        """直播弹幕的意愿判断（和群聊同一套 manager/系数/被@必回规则）。
+
+        直播不是 OneBot 会话：不套 QQ 群白/黑名单，直接构造 WillingContext；
+        会话 id 用 live:<room_id>，便于运行时系数按直播间单独调整。
+        """
+        target_uid = int(uid or 0)
+        room = int(room_id or 0)
+        message = GroupMessage(
+            message_id=None,
+            user_id=target_uid,
+            group_id=room,
+            message=[MessageSegment(type="text", data={"text": text})],
+            raw_message=text,
+        )
+        mentioned = self._called_bot_name(text)
+        reply_mode = str(getattr(self._config.chat, "reply_mode", "agent") or "agent")
+        config_global_coeff = (
+            self._config.chat.willing_agent_global_coefficient
+            if reply_mode == "agent"
+            else self._config.chat.willing_global_coefficient
+        )
+        context = WillingContext(
+            manager_name=self._manager.name,
+            conversation_type="group",
+            conversation_id=f"live:{room}",
+            sender_id=str(target_uid),
+            message_id=None,
+            text=text,
+            raw_message=text,
+            queue=MessageQueue(),
+            queue_size=0,
+            queue_text="",
+            observe_window=max(1, int(self._config.willing.observe_window)),
+            observed_messages_text=tuple(observed_messages),
+            base_probability=self._base_probability("group"),
+            conversation_coefficient=1.0,
+            bot_account=int(self._config.bot.account),
+            bot_name=self._config.bot.nick_name,
+            bot_aliases=tuple(self._config.bot.alias_name or []),
+            mentioned_bot=mentioned,
+            called_bot_name=mentioned,
+            replied_to_message=False,
+            has_question=self._has_question(text),
+            matched_keywords=tuple(self._matched_keywords(text)),
+            is_direct_message=False,
+            is_allowed=True,
+            block_reason="",
+            message=message,
+            at_guaranteed_reply=bool(
+                getattr(self._config.chat, "at_mention_guaranteed_reply", True)
+                and mentioned
+            ),
+            config_global_coefficient=config_global_coeff,
+            runtime_config=self._runtime_config,
+            is_official_bot=False,
+            official_bot_coefficient=float(
+                getattr(self._config.chat, "official_bot_reply_coefficient", 0.05) or 0.05
+            ),
         )
         return self._manager.evaluate(context)
 

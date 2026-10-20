@@ -53,6 +53,7 @@ class BilibiliRuntime:
         asr_service: Any = None,
         vision_provider: Any = None,
         on_live_event: Any = None,
+        willing_service: Any = None,
         logger: Logger | None = None,
         bot_name: str = "",
         bot_data: str = "",
@@ -114,6 +115,7 @@ class BilibiliRuntime:
             asr_service=asr_service,
             vision_provider=vision_provider,
             on_event=on_live_event,
+            willing_service=willing_service,
         )
         self.channel = BilibiliCrossChatChannel(
             self.service, self.engine, live_interactor=self.live_interactor

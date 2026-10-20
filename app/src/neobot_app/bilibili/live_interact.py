@@ -4,7 +4,7 @@
 再连 B站弹幕 WebSocket（`wss://host:wss_port/sub`）收 DANMU_MSG，按需调用
 provider 生成一句极短回复，再由 BilibiliClient.send_danmaku 发出。
 
-只参与开播阶段：房间 live_status 缓存 60 秒，自动回复/定时弹幕/手动弹幕都先查；
+只参与开播阶段：房间 live_status 缓存 60 秒，自动回复走群聊式 WillingService 意愿判断，定时弹幕/手动弹幕都先查；
 下播时 WSS 可以继续收弹幕（保留历史），但不生成、不发送。
 
 启用房间与定时弹幕持久化在 `<DATA_DIR>/bilibili/live_interact.json`；
@@ -92,6 +92,7 @@ class BilibiliLiveInteractor:
         vision_provider: Any = None,
         media_service: Any = None,
         on_event: Callable[[LiveEvent], Any] | None = None,
+        willing_service: Any = None,
     ) -> None:
         # service 可以是 BilibiliService 或 BilibiliClient；每轮用 resolve_client 取当前 client。
         self._service = service
@@ -127,6 +128,7 @@ class BilibiliLiveInteractor:
         self._event_keys = RecentIds(_MAX_EVENT_KEYS)
         self._event_tasks: set[asyncio.Task[None]] = set()
         self._on_event = on_event
+        self._willing_service = willing_service
         self._live_cache: dict[str, tuple[float, bool]] = {}
         self._schedule_task: asyncio.Task[None] | None = None
         self._loaded = False
@@ -675,7 +677,7 @@ class BilibiliLiveInteractor:
         if my_uid and _to_int(danmu.get("uid")) == my_uid:
             return
         text = str(danmu.get("text") or "")
-        if self._at_only and not self._mentions_bot(text):
+        if not self._should_reply(room_id, danmu, text):
             return
         if not self._reply_allowed(room_id):
             return
@@ -718,6 +720,41 @@ class BilibiliLiveInteractor:
         if not sent:
             self._logger.warning(f"B站直播{action}发送失败", room_id=room_id)
         return bool(sent)
+
+    def _should_reply(self, room_id: str, danmu: dict[str, Any], text: str) -> bool:
+        """群聊式意愿判断；无 willing_service 时退回旧的 @ 过滤。"""
+        willing = self._willing_service
+        if willing is None:
+            return (not self._at_only) or self._mentions_bot(text)
+        try:
+            history = self.get_history(_to_int(room_id), 20)
+            observed = tuple(
+                f"{item.get('name') or '观众'}: {item.get('text') or ''}"
+                for item in history
+                if str(item.get("text") or "").strip()
+            )
+            decision = willing.evaluate_live(
+                room_id=_to_int(room_id),
+                uid=_to_int(danmu.get("uid")),
+                name=str(danmu.get("name") or ""),
+                text=text,
+                observed_messages=observed,
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "直播弹幕意愿判断失败，按不回复处理",
+                room_id=room_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return False
+        if not decision.should_reply:
+            self._logger.debug(
+                "直播弹幕意愿判断：不回复",
+                room_id=room_id,
+                probability=getattr(decision, "probability", 0.0),
+                reasons=getattr(decision, "reasons", ()),
+            )
+        return bool(decision.should_reply)
 
     def _mentions_bot(self, text: str) -> bool:
         if not self._bot_name:

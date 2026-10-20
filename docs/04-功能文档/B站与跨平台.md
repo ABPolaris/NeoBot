@@ -34,6 +34,7 @@
 | bilibili_video__like_comment(identifier,rpid) | 给视频评论点赞（写操作） |
 | bilibili_user__user_info(uid) | B站用户资料 |
 | bilibili_user__user_videos(uid,page) | 用户投稿列表 |
+| bilibili_user__follow_user(uid,action) | 关注/取消关注B站用户（公开写操作） |
 | bilibili_user__linked_qq_profile(uid) | 按B站UID查关联的QQ主页：QQ号、备注、印象、user_summary/user_profile 档案；无关联明确提示 |
 | bilibili_link__link_account / unlink_account / get_link | 账号关联 |
 | bilibili_memory__save/read/list/delete_memory | B站长期记忆 |
@@ -54,12 +55,12 @@
 | 命令 | 权限 | 说明 |
 |---|---|---|
 | /直播互动 <房间号|链接> 开|关 | 次级管理员 | 启用/停用某房间弹幕交互并持久化 |
-| /直播互动AI <房间号> 开|关 | 次级管理员 | 开关该房间自动回复（只回 @bot，默认开） |
+| /直播互动AI <房间号> 开|关 | 次级管理员 | 开关该房间自动回复（群聊式意愿判断，@/叫名字必回） |
 | /直播互动列表 | 所有人 | 查看已启用房间、真实房间号、自动回复状态 |
 | /直播发言 <房间号|链接> <文本> | 次级管理员 | 用当前登录B站账号手动发一条弹幕 |
 
 - 使用当前 B站登录态（/login bilibili 的 cookie）；未登录时只能记录房间，发弹幕/自动回复不可用。
-- 自动回复：只对包含 bot 昵称/@bot 的弹幕、排除自己、同房间 20s 冷却 + 每分钟最多 3 条、回复截断 40 字符；provider 不可用时只监听。
+- 自动回复：和群聊共用 WillingService 意愿判断（被 @/叫名字按 at_mention_guaranteed_reply 必回，其余按概率/问句/系数）；排除自己、同房间 20s 冷却 + 每分钟最多 3 条、回复截断 40 字符。无 willing 服务时退回旧的 live_interaction_at_only @过滤。
 - 状态文件：data/bilibili/live_interact.json，重启自动恢复。
 - 直播监听（开播/下播通知）在 streaming_parser 插件里，和这里完全分开。
 
@@ -71,6 +72,12 @@
 - 所有自动回复、定时弹幕、手动发弹幕都先检查开播状态，下播不互动；只在开播阶段参与。
 - 自动回复、定时弹幕、跨聊天直播投递触发时，会先抓一帧当前画面并让视觉模型生成画面描述，作为回复上下文（没有视觉模型时跳过截图）。
 - 跨聊天可通过 target_kind=bilibili + live:<room_id> 把任务派给直播间（同样仅开播时发送）。
+
+## UP投稿更新轮询（调研/预备，未实装）
+
+已补 bilibili_user__follow_user 的 B站账号关注/取关；后台“关注 UP 并轮询新视频”尚未接线。
+调研与预备设计见 Reference/_research/bilibili-update-polling.md，纯 diff/状态代码在
+app/src/neobot_app/bilibili/updates.py（当前未被 runtime 引用），暂不启动轮询/通知。
 
 ## 直播监听
 

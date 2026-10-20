@@ -120,6 +120,11 @@ class FakeClient:
             ]
         }
 
+    async def follow_user(self, uid, *, follow=True):
+        self.follow_calls = getattr(self, "follow_calls", [])
+        self.follow_calls.append((uid, follow))
+        return True
+
 
 class LegacyCommentsClient(FakeClient):
     """旧客户端：评论只有列表形式的 get_video_comments。"""
@@ -1112,3 +1117,17 @@ def test_read_tools_are_explicitly_read_only() -> None:
         assert "只读" in description
         assert "不自动回复" in description
         assert "comment_video" in description
+
+
+
+async def test_follow_user_tool_passes_action() -> None:
+    client = FakeClient()
+    skill = BilibiliUserSkill(client=client)
+
+    result = json.loads(
+        await skill.execute("follow_user", {"uid": "42", "action": "unfollow"})
+    )
+
+    assert result["ok"] is True
+    assert result["action"] == "unfollow"
+    assert client.follow_calls == [(42, False)]

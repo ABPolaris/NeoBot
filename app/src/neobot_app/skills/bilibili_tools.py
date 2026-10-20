@@ -770,7 +770,7 @@ class BilibiliUserSkill(_BilibiliToolBase):
 
     @property
     def description(self) -> str:
-        return "B站用户：查用户资料、投稿视频、该用户关联的QQ主页"
+        return "B站用户：查用户资料、投稿视频、关注/取关、该用户关联的QQ主页"
 
     @property
     def instructions(self) -> str:
@@ -778,6 +778,7 @@ class BilibiliUserSkill(_BilibiliToolBase):
             "B站用户 Skill 提供以下能力：\n\n"
             "  user_info — 查B站用户资料：昵称、签名、等级、空间链接。\n"
             "  user_videos — 查该用户的投稿视频（标题、BV号、播放量、链接）。\n"
+            "  follow_user — 关注/取消关注该 B站用户（公开写操作，确认意图后调用）。\n"
             "  linked_qq_profile — 按B站UID查该用户关联的QQ主页资料：QQ号、好友备注、"
             "你对Ta的印象，以及 user_summary / user_profile 长期档案。\n\n"
             "uid 支持纯数字 UID 或 space.bilibili.com 空间链接。"
@@ -811,6 +812,25 @@ class BilibiliUserSkill(_BilibiliToolBase):
                             "description": "B站UID（纯数字）或空间链接",
                         },
                         "page": {"type": "integer", "description": "页码，默认1", "default": 1},
+                    },
+                    "required": ["uid"],
+                },
+            ),
+            self._tool_def(
+                "follow_user",
+                "关注或取消关注一个B站用户（会以当前登录B站账号公开操作，确认用户意图后再调用）。",
+                {
+                    "properties": {
+                        "uid": {
+                            "type": "string",
+                            "description": "B站UID（纯数字）或空间链接",
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["follow", "unfollow"],
+                            "description": "follow=关注，unfollow=取消关注",
+                            "default": "follow",
+                        },
                     },
                     "required": ["uid"],
                 },
@@ -1435,6 +1455,27 @@ async def _handle_user_info(skill: _BilibiliToolBase, args: dict) -> str:
     return _json({"ok": True, **detail})
 
 
+async def _handle_follow_user(skill: _BilibiliToolBase, args: dict) -> str:
+    uid = _parse_uid(args.get("uid"))
+    if not uid:
+        return _json({"ok": False, "error": "缺少或无效的 uid（B站UID 或空间链接）"})
+    action = str(args.get("action") or "follow").strip().lower()
+    if action not in {"follow", "unfollow"}:
+        return _json({"ok": False, "error": "action 必须是 follow 或 unfollow"})
+    client = skill._require_client("follow_user")
+    sent = await call_client(client.follow_user, uid, follow=action == "follow")
+    if not sent:
+        return _json({"ok": False, "error": f"B站{'关注' if action == 'follow' else '取消关注'}失败（可能未登录或触发风控）"})
+    return _json(
+        {
+            "ok": True,
+            "uid": uid,
+            "action": action,
+            "note": "已以当前登录B站账号公开操作",
+        }
+    )
+
+
 async def _handle_user_videos(skill: _BilibiliToolBase, args: dict) -> str:
     uid = _parse_uid(args.get("uid"))
     if not uid:
@@ -1561,5 +1602,6 @@ _HANDLERS = {
     "favorite_folders": _handle_favorite_folders,
     "user_info": _handle_user_info,
     "user_videos": _handle_user_videos,
+    "follow_user": _handle_follow_user,
     "linked_qq_profile": _handle_linked_qq_profile,
 }

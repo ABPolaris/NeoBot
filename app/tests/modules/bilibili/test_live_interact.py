@@ -8,6 +8,7 @@ import time
 import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -667,3 +668,42 @@ async def test_reply_chain_captures_frame_context(tmp_path: Path) -> None:
 
 async def _async_value(value):
     return value
+
+
+class _FakeWilling:
+    def __init__(self, should_reply: bool) -> None:
+        self.should_reply_value = should_reply
+        self.calls: list[dict] = []
+
+    def evaluate_live(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            should_reply=self.should_reply_value,
+            probability=1.0 if self.should_reply_value else 0.0,
+            reasons=("test",),
+        )
+
+
+async def test_live_auto_reply_uses_willingness_without_at(tmp_path: Path) -> None:
+    provider = _FakeProvider("欢迎")
+    interactor, client, _ = await _enabled(
+        tmp_path, provider=provider, at_only=True
+    )
+    willing = _FakeWilling(True)
+    interactor._willing_service = willing
+
+    await interactor._handle_danmu("5440", {"uid": 9, "name": "观众", "text": "在吗"})
+    assert client.sent == [(5440, "欢迎")]
+    assert willing.calls and willing.calls[0]["room_id"] == 5440
+    assert willing.calls[0]["text"] == "在吗"
+
+
+async def test_live_auto_reply_skips_when_willingness_denies(tmp_path: Path) -> None:
+    provider = _FakeProvider("欢迎")
+    interactor, client, _ = await _enabled(
+        tmp_path, provider=provider, at_only=False
+    )
+    interactor._willing_service = _FakeWilling(False)
+
+    await interactor._handle_danmu("5440", {"uid": 9, "name": "观众", "text": "在吗"})
+    assert client.sent == []

@@ -260,3 +260,25 @@ def test_favorite_video_posts_deal_form_and_degrades() -> None:
     assert _client(FakeSession()).favorite_video("不是视频", 101) is False
     denied = FakeSession([FakeResponse({"code": -111, "message": "csrf校验失败"})])
     assert _client(denied).favorite_video("av170001", 101) is False
+
+
+
+def test_follow_user_posts_relation_modify() -> None:
+    session = FakeSession([FakeResponse({"code": 0, "data": {}})])
+    assert _client(session).follow_user(42, follow=True) is True
+    call = session.calls[-1]
+    assert call["method"] == "POST"
+    assert call["url"].endswith("/x/relation/modify")
+    assert call["data"] == {"fid": 42, "act": 1, "re_src": 11, "csrf": "bili-jct"}
+
+    session = FakeSession([FakeResponse({"code": 0, "data": {}})])
+    assert _client(session).follow_user(42, follow=False) is True
+    assert session.calls[-1]["data"]["act"] == 2
+
+
+def test_follow_user_degrades_on_bad_uid_or_login() -> None:
+    assert _client(FakeSession()).follow_user(0) is False
+    client = _client(FakeSession())
+    client._sessdata = ""  # type: ignore[attr-defined]
+    client._bili_jct = ""  # type: ignore[attr-defined]
+    assert client.follow_user(42) is False
