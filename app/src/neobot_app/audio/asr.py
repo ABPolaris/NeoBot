@@ -138,12 +138,13 @@ class ASRService:
 
     async def _prepare_audio(self, source: Path, out_dir: Path) -> Path | str:
         """转 16k 单声道 mp3；返回转换后路径，失败返回中文错误说明。"""
-        ffmpeg = shutil.which("ffmpeg")
-        if ffmpeg is None:
-            return f"{_ERROR_PREFIX}未找到 ffmpeg（请安装后加入 PATH）"
+        # 先看时长：即使机器没装 ffmpeg，超长音频也应该报“时长超限”而不是误导成环境问题。
         duration = await self._probe_duration(source)
         if duration is not None and duration > MAX_AUDIO_SECONDS:
             return f"{_ERROR_PREFIX}音频超过 {MAX_AUDIO_SECONDS // 60} 分钟上限"
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            return f"{_ERROR_PREFIX}未找到 ffmpeg（请安装后加入 PATH）"
         output = out_dir / "audio.mp3"
         # -t 兜底：探测不到时长（流式/损坏容器）时也只会截前 1 小时再上传。
         command = [

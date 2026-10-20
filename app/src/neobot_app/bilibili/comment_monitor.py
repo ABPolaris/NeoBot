@@ -349,7 +349,9 @@ class BilibiliCommentMonitor:
         if self._cooldown <= 0:
             return True
         key = f"{event.oid}:{event.root_id}"
-        last = self._last_reply_at.get(key, 0.0)
+        last = self._last_reply_at.get(key)
+        if last is None:
+            return True
         return time.monotonic() - last >= self._cooldown
 
     async def _reply(self, event: CommentEvent, client: Any) -> bool:
