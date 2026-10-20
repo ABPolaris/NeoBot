@@ -473,7 +473,7 @@ def test_classify_empty_turn_distinguishes_truncation(response, expected):
 
 
 async def test_empty_turn_marks_event_failed_and_records_reason(monkeypatch):
-    """空轮次不得静默收尾：必须置 FAILED、写 error、留 empty_turn_* 记录，且不重试。"""
+    """空轮次先追加一次确认提示；第二次仍空才置 FAILED、写 error、留 empty_turn_* 记录。"""
     provider = _ScriptedProvider(
         [
             {
@@ -490,6 +490,7 @@ async def test_empty_turn_marks_event_failed_and_records_reason(monkeypatch):
             }
         ]
     )
+    provider._responses.append(dict(provider._responses[0]))
     orch = _make_orchestrator(provider=provider)
     queue = MessageQueue()
 
@@ -519,8 +520,9 @@ async def test_empty_turn_marks_event_failed_and_records_reason(monkeypatch):
             break
         await asyncio.sleep(0.1)
 
-    # 决策：不做重试（实测大概率拿不到有效输出，只会白烧 input token）。
-    assert len(provider.calls) == 1
+    # 新行为：先追加一次 send_reply/cancel 提示，第二次仍无工具调用才判失败。
+    assert len(provider.calls) == 2
+    assert any(stage == "no_tool_call_reminder" for stage, _ in stages)
     assert event.state.name == "FAILED"
     assert event.error and "截断" in event.error
     assert event.generated_text == ""
@@ -537,7 +539,7 @@ async def test_empty_turn_marks_event_failed_and_records_reason(monkeypatch):
     # 规范化：agent_iteration 必须把结束原因与预算提升为一级字段，
     # 否则排查截断只能去挖 response.extensions 的嵌套结构。
     iterations = [extra for stage, extra in stages if stage == "agent_iteration"]
-    assert len(iterations) == 1
+    assert len(iterations) == 2
     assert iterations[0]["finish_reason"] == "length"
     assert iterations[0]["max_tokens"] == 10000
     assert iterations[0]["output_tokens"] == 10000
@@ -548,6 +550,7 @@ async def test_empty_turn_marks_event_failed_and_records_reason(monkeypatch):
 async def test_empty_turn_without_finish_reason_is_recorded_as_empty(monkeypatch):
     """没有 finish_reason 的空输出同样必须留痕，且不得被当成截断。"""
     provider = _ScriptedProvider([{"content": "", "tool_calls": []}])
+    provider._responses.append(dict(provider._responses[0]))
     orch = _make_orchestrator(provider=provider)
     queue = MessageQueue()
 
@@ -577,6 +580,7 @@ async def test_empty_turn_without_finish_reason_is_recorded_as_empty(monkeypatch
             break
         await asyncio.sleep(0.1)
 
+    assert len(provider.calls) == 2
     assert event.state.name == "FAILED"
     assert event.error and "空输出" in event.error
     detected = [extra for stage, extra in stages if stage == "empty_turn_detected"]
@@ -2941,4 +2945,80 @@ async def test_private_history_compact_uses_dsh_checkpoint():
         "<compacted-summary>" in str(item.get("content") or "") for item in messages
     )
     assert "private_context_compacted" in recorded
+    await orch.shutdown()
+
+
+
+async def test_no_tool_call_reminder_then_send_reply_succeeds(monkeypatch):
+    provider = _ScriptedProvider([{"content": "", "tool_calls": []}, _send_reply_response("收到")])
+    orch = _make_orchestrator(provider=provider)
+    queue = MessageQueue()
+
+    async def _no_suspend(source, snapshot, queue_key):
+        return [], None
+
+    monkeypatch.setattr(orch, "_suspend_private_chat", _no_suspend)
+    stages: list = []
+    original = orch._record_debug
+
+    def _capture(stage, event, **extra):
+        stages.append((stage, extra))
+        return original(stage, event, **extra)
+
+    monkeypatch.setattr(orch, "_record_debug", _capture)
+    event = orch.start_reply(
+        message=_make_private_message(), queue=queue, queue_key="123456", decision=_make_decision()
+    )
+    for _ in range(200):
+        if not orch._active_pipelines:
+            break
+        await asyncio.sleep(0.01)
+
+    assert len(provider.calls) == 2
+    assert event.state.name == "COMPLETED"
+    assert event.generated_text == "收到"
+    assert any(stage == "no_tool_call_reminder" for stage, _ in stages)
+    await orch.shutdown()
+
+
+
+async def test_no_tool_call_reminder_then_cancel(monkeypatch):
+    cancel_response = {
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "cancel",
+                "type": "function",
+                "function": {"name": "cancel", "arguments": None},
+            }
+        ],
+    }
+    provider = _ScriptedProvider([{"content": "", "tool_calls": []}, cancel_response])
+    orch = _make_orchestrator(provider=provider)
+    queue = MessageQueue()
+
+    async def _no_suspend(source, snapshot, queue_key):
+        return [], None
+
+    monkeypatch.setattr(orch, "_suspend_private_chat", _no_suspend)
+    stages: list = []
+    original = orch._record_debug
+
+    def _capture(stage, event, **extra):
+        stages.append((stage, extra))
+        return original(stage, event, **extra)
+
+    monkeypatch.setattr(orch, "_record_debug", _capture)
+    event = orch.start_reply(
+        message=_make_private_message(), queue=queue, queue_key="123456", decision=_make_decision()
+    )
+    for _ in range(200):
+        if not orch._active_pipelines:
+            break
+        await asyncio.sleep(0.01)
+
+    assert len(provider.calls) == 2
+    assert event.state.name == "CANCELLED"
+    assert event.generated_text in ("", None)
+    assert any(stage == "no_tool_call_reminder" for stage, _ in stages)
     await orch.shutdown()
