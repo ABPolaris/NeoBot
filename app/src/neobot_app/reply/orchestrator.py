@@ -313,6 +313,12 @@ def _parse_tool_args(value: object) -> dict[str, Any]:
 EMPTY_TURN_TRUNCATED = "truncated"
 #: 空轮次成因：模型没给正文也没调工具，且不是长度截断。
 EMPTY_TURN_NO_OUTPUT = "empty"
+_NO_TOOL_CALL_REMINDER = (
+    "系统提醒：你刚才没有调用任何工具。"
+    "如果你确认不需要回复或执行任何操作，请调用 cancel 工具结束；"
+    "如果需要回复用户，请调用 send_reply 工具发送回复。"
+    "不要只输出正文草稿，也不要重复分析。"
+)
 
 #: [silent_nudge] 分区缺失时的内置兜底文本（与 templates/prompts.toml 的定稿逐字一致）。
 _SILENT_NUDGE_TEXT = (
@@ -2866,6 +2872,7 @@ class ReplyOrchestrator:
             round_index += 1
             reply_sent = False
             cancelled = False
+            no_tool_reminders = 0
             # 时间块分级:每轮(每次管线激活)重置为"尚未注入完整时间块"
             time_block_full_sent = False
             # 防重复提醒:每次管线激活只追加一次
@@ -3112,6 +3119,22 @@ class ReplyOrchestrator:
                     continue
                 if not tool_calls:
                     if not reply_sent:
+                        if no_tool_reminders < 1:
+                            no_tool_reminders += 1
+                            messages.append({"role": "user", "content": _NO_TOOL_CALL_REMINDER})
+                            self._record_debug(
+                                "no_tool_call_reminder",
+                                event,
+                                queue_key=queue_key,
+                                iteration=iteration + 1,
+                            )
+                            self._logger.info(
+                                "模型未调用工具，已追加 send_reply/cancel 确认提示",
+                                event_id=event.event_id,
+                                queue_key=queue_key,
+                                iteration=iteration + 1,
+                            )
+                            continue
                         content = response.get("content", "")
                         text = (
                             content.strip()

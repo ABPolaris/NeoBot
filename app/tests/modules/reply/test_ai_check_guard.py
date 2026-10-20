@@ -103,11 +103,12 @@ async def test_plain_prose_without_tool_is_failed_and_never_sent(monkeypatch, fu
     extras: list = []
     event, provider, sent, stages, runtime_stages, queue = await run_script(
         monkeypatch,
-        [{"content": draft, "tool_calls": []}],
+        [{"content": draft, "tool_calls": []}, {"content": draft, "tool_calls": []}],
         full_check=full_check,
         extras=extras,
     )
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
+    assert "no_tool_call_reminder" in stages
     assert event.state is ReplyState.FAILED
     assert event.completed_at is not None
     assert "没有调用工具" in event.error
@@ -128,9 +129,12 @@ async def test_review_without_tool_is_failed_and_never_sends_draft(monkeypatch, 
     draft = "你好" if full_check else "很长的待审草稿" * 100
     first = tool_response("send_reply", {"text": draft})
     event, provider, sent, stages, runtime_stages, queue = await run_script(
-        monkeypatch, [first, {"content": review, "tool_calls": []}], full_check=full_check,
+        monkeypatch,
+        [first, {"content": review, "tool_calls": []}, {"content": review, "tool_calls": []}],
+        full_check=full_check,
     )
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3
+    assert "no_tool_call_reminder" in stages
     assert event.state is ReplyState.FAILED
     assert event.completed_at is not None
     assert "AI回复检查未通过" in event.error
@@ -164,9 +168,13 @@ async def test_structured_review_decisions_still_work(monkeypatch, kind, decisio
 @pytest.mark.parametrize("kind", ["group", "private"])
 async def test_bare_cancel_in_plain_model_output_is_not_claimed_sent(monkeypatch, kind):
     event, provider, sent, stages, runtime_stages, _ = await run_script(
-        monkeypatch, [{"content": "cancel", "tool_calls": []}], full_check=False, kind=kind,
+        monkeypatch,
+        [{"content": "cancel", "tool_calls": []}, {"content": "cancel", "tool_calls": []}],
+        full_check=False,
+        kind=kind,
     )
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
+    assert "no_tool_call_reminder" in stages
     sent.assert_not_awaited()
     assert event.state is ReplyState.FAILED
     assert event.send_response is None
