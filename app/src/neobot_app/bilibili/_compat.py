@@ -69,5 +69,9 @@ class RecentIds:
         self._seen.add(key)
         return True
 
+    def keys(self) -> list[str]:
+        """按插入顺序返回当前保留的 key（持久化 restore 用）。"""
+        return list(self._items)
+
     def __contains__(self, key: str) -> bool:
         return key in self._seen
