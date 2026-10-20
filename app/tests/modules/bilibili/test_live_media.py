@@ -342,3 +342,39 @@ async def test_transcribe_degrades_without_asr_ffmpeg_or_stream(
 
 async def _fake_ensure_ffmpeg(**_kwargs: Any) -> FFmpegTools:
     return FFmpegTools(_FFMPEG, None)
+
+
+# ── 录制片段 ──
+
+
+async def test_record_clip_saves_flv(tmp_path: Path, fake_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_run = _FakeRun(payload=b"fake-flv")
+    monkeypatch.setattr(live_media.subprocess, "run", fake_run)
+    service = LiveMediaService(_FakeClient(), data_dir=tmp_path / "data")
+
+    result = await service.record_clip(5050, seconds=12)
+
+    assert result["ok"] is True
+    assert result["seconds"] == 12
+    clip = Path(result["path"])
+    assert clip.is_file() and clip.read_bytes() == b"fake-flv"
+    assert clip.parent == tmp_path / "data" / "live_clips"
+    command = fake_run.commands[0]
+    assert command[command.index("-t") + 1] == "12"
+    assert command[command.index("-c") + 1] == "copy"
+    assert command[-1] == result["path"]
+
+
+async def test_record_clip_failure_cleans_partial(
+    tmp_path: Path, fake_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        live_media.subprocess,
+        "run",
+        _FakeRun(returncode=1, stderr=b"CDN 403"),
+    )
+    service = LiveMediaService(_FakeClient(), data_dir=tmp_path)
+    result = await service.record_clip(5050)
+    assert result["ok"] is False
+    assert "CDN 403" in result["error"]
+    assert list((tmp_path / "live_clips").iterdir()) == []
