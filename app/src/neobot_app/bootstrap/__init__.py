@@ -1075,6 +1075,51 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
         asr_service = build_asr_service(
             config, logger=logger_factory.get_logger("app.asr")
         )
+        async def _notify_live_event(event: Any) -> None:
+            """把直播事件按配置推送到 QQ；失败不打断监听。"""
+            try:
+                section = getattr(config, "bilibili", None)
+                targets = list(getattr(section, "live_event_notify_targets", None) or [])
+                kinds = set(
+                    getattr(section, "live_event_notify_kinds", None)
+                    or ["gift", "super_chat", "guard"]
+                )
+                kind = str(getattr(event, "kind", "") or "")
+                if not targets or kind not in kinds or adapter is None:
+                    return
+                name = str(getattr(event, "name", "") or "观众")
+                value = int(getattr(event, "value", 0) or 0)
+                text = str(getattr(event, "text", "") or "")
+                if kind == "gift":
+                    message = f"🎁 {name} 送出 {value} 瓜子"
+                elif kind == "super_chat":
+                    message = f"💬 SC ¥{value} {name}：{text}"
+                elif kind == "guard":
+                    message = f"🚢 {name} 上舰（{value}）"
+                elif kind == "enter":
+                    message = f"👋 {name} 进入直播间"
+                else:
+                    message = f"[{kind}] {name} {text}".strip()
+                from neobot_contracts.models import ConversationRef
+
+                for target in targets:
+                    raw = str(target or "").strip()
+                    if ":" not in raw:
+                        continue
+                    conv_kind, conv_id = raw.split(":", 1)
+                    if conv_kind not in {"group", "private"} or not conv_id:
+                        continue
+                    try:
+                        await adapter.send(
+                            ConversationRef(kind=conv_kind, id=conv_id),
+                            [{"type": "text", "data": {"text": message}}],
+                            wait_response=False,
+                        )
+                    except Exception:
+                        continue
+            except Exception:
+                return
+
         bili_runtime = BilibiliRuntime(
             config=config,
             provider=provider,
@@ -1083,6 +1128,7 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
             command_service=command_service,
             asr_service=asr_service,
             vision_provider=vision_provider,
+            on_live_event=_notify_live_event,
             logger=logger_factory.get_logger("app.bilibili"),
             bot_name=config.bot.nick_name,
             bot_data=config.bot.bot_data,
