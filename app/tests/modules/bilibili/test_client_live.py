@@ -282,3 +282,10 @@ def test_follow_user_degrades_on_bad_uid_or_login() -> None:
     client._sessdata = ""  # type: ignore[attr-defined]
     client._bili_jct = ""  # type: ignore[attr-defined]
     assert client.follow_user(42) is False
+
+
+
+def test_send_danmaku_rejects_over_twenty_chars() -> None:
+    session = FakeSession([FakeResponse(_ROOM_INFO), FakeResponse({"code": 0, "data": {}})])
+    assert _client(session).send_danmaku(5440, "x" * 21) is False
+    assert session.calls == []
