@@ -175,7 +175,7 @@ async def test_group_history_merges_local_bot_record_in_time_order(uow_factory):
     )
 
     assert _texts(group_queue, str(GROUP_ID)) == ["早", "在吗", "在的", "喂"]
-    assert _roles(group_queue, str(GROUP_ID)) == ["user", "user", "assistant", "user"]
+    assert _roles(group_queue, str(GROUP_ID)) == ["user", "user", "assistant", "tool", "user"]
 
 
 async def test_group_history_skips_bot_record_already_in_backend(uow_factory):
@@ -197,7 +197,7 @@ async def test_group_history_skips_bot_record_already_in_backend(uow_factory):
     )
 
     assert _texts(group_queue, str(GROUP_ID)) == ["在吗", "在的"]
-    assert _roles(group_queue, str(GROUP_ID)) == ["user", "assistant"]
+    assert _roles(group_queue, str(GROUP_ID)) == ["user", "assistant", "tool"]
 
 
 async def test_group_history_keeps_bot_record_outside_dedup_window(uow_factory):
@@ -217,7 +217,7 @@ async def test_group_history_keeps_bot_record_outside_dedup_window(uow_factory):
     await manager._process_group_history(GroupData(group_id=GROUP_ID), max_observations=20)
 
     assert _texts(group_queue, str(GROUP_ID)) == ["在吗", "在的", "在的"]
-    assert _roles(group_queue, str(GROUP_ID)) == ["user", "assistant", "assistant"]
+    assert _roles(group_queue, str(GROUP_ID)) == ["user", "assistant", "tool", "assistant", "tool"]
 
 
 async def test_merge_never_dedups_other_senders(uow_factory):
@@ -237,7 +237,7 @@ async def test_merge_never_dedups_other_senders(uow_factory):
 
     messages = list(group_queue.iterate_from_oldest(str(GROUP_ID)))
     assert [message.user_id for message in messages] == [USER_QQ, BOT_QQ]
-    assert _roles(group_queue, str(GROUP_ID)) == ["user", "assistant"]
+    assert _roles(group_queue, str(GROUP_ID)) == ["user", "assistant", "tool"]
 
 
 async def test_friend_history_merges_local_bot_record(uow_factory):
@@ -259,7 +259,7 @@ async def test_friend_history_merges_local_bot_record(uow_factory):
     )
 
     assert _texts(friend_queue, str(FRIEND_QQ)) == ["在吗", "在的", "喂"]
-    assert _roles(friend_queue, str(FRIEND_QQ)) == ["user", "assistant", "user"]
+    assert _roles(friend_queue, str(FRIEND_QQ)) == ["user", "assistant", "tool", "user"]
 
 
 async def test_merge_failure_keeps_backend_history(uow_factory):
@@ -326,7 +326,7 @@ async def test_reply_persisted_then_soft_restart_restores_assistant_block(uow_fa
     await manager._process_group_history(GroupData(group_id=GROUP_ID), max_observations=20)
 
     assert _texts(group_queue, str(GROUP_ID)) == ["在吗", "在的"]
-    assert _roles(group_queue, str(GROUP_ID)) == ["user", "assistant"]
+    assert _roles(group_queue, str(GROUP_ID)) == ["user", "assistant", "tool"]
 
 
 class FakeQueueLike:
