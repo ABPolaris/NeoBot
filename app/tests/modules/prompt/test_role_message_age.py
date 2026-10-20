@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -81,10 +82,17 @@ def test_assistant_lines_stay_free_of_any_annotation():
     queue = _queue([(BASE, _message(1, "问题")), (BASE + 60, bot)], bot_account=999)
 
     messages = build_role_messages(queue, KEY, bot_account=999)
-    assistant = [m["content"] for m in messages if m["role"] == "assistant"]
-
-    assert assistant == ["我回复过了"]
-    assert all("分钟前" not in line and "[msg_id=" not in line for line in assistant)
+    assistant = [m for m in messages if m["role"] == "assistant"]
+    assert len(assistant) == 1
+    assert assistant[0]["content"] == ""
+    call = assistant[0]["tool_calls"][0]
+    assert call["function"]["name"] == "send_reply"
+    arguments = json.loads(call["function"]["arguments"])
+    assert arguments["text"] == "我回复过了"
+    assert "分钟前" not in arguments["text"] and "[msg_id=" not in arguments["text"]
+    assert any(
+        m.get("role") == "tool" and m.get("tool_call_id") == call["id"] for m in messages
+    )
 
 
 def test_quoted_message_carries_its_own_age():
