@@ -4,7 +4,7 @@ covers:
   - app/src/neobot_app/browser/
   - app/src/neobot_app/runtime/browser_lifecycle.py
 verified_against: 528fe18
-verified_hash: 268c4d4cb324
+verified_hash: 4568d43569dc
 ---
 
 # 12 浏览器自动化：DrissionPage 会话管理 · 动作集 · per-chat-flow 生命周期
