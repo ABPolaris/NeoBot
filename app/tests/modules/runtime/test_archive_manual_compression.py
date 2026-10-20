@@ -668,6 +668,7 @@ async def test_prompt_requires_pagination_when_text_is_omitted(env, monkeypatch)
     assert "read_archive(offset=...)" in prompt
     assert "中段唯一标记" not in prompt  # 中间段确实被省略了
     assert "Never claim the record" in prompt
+    assert "compaction engine" in prompt
     assert MAX_OVERFLOW_PROMPT_CHARS == 60_000
 
 

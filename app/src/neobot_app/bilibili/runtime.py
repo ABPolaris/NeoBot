@@ -13,6 +13,7 @@ from typing import Any
 
 from neobot_app.bilibili.channel import BilibiliCrossChatChannel
 from neobot_app.bilibili.comment_monitor import BilibiliCommentMonitor
+from neobot_app.core import DATA_DIR
 from neobot_app.bilibili.diary import BilibiliDiaryService, BilibiliDiarySkill
 from neobot_app.bilibili.live_interact import BilibiliLiveInteractor
 from neobot_app.bilibili.media import BilibiliVideoService
@@ -74,7 +75,7 @@ class BilibiliRuntime:
             bot_data=bot_data,
         )
         self.comment_monitor = BilibiliCommentMonitor.from_config(
-            self.service, self.engine, cfg
+            self.service, self.engine, cfg, data_dir=DATA_DIR
         )
         self.private_monitor = BilibiliPrivateMonitor.from_config(
             self.service, self.engine, cfg

@@ -87,6 +87,8 @@ B站视频搜索/看视频走上面的 agent 工具（QQ 侧触发），直播�
 
 ## 风险
 
+- **评论已回复持久化**：评论监控把已处理评论记入 data/bilibili/comment_replies.json，重启后继续去重，避免反复回复同一评论。
+
 - 前端控制台扫码页已实现：面板打开 /bilibili/login 扫码（需面板登录；远程访问受 allow_remote_manage 限制）。
 - 扫码成功、发评论/私信/动态、搜索/看视频/查用户、直播间弹幕收发与点赞均只经 mock + 匿名接口验证，未用真实账号全面实测；写操作可能触发B站风控。ASR 路径取决于 SiliconFlow key 与视频是否有公开字幕。
 - 评论回复已记录 token 用量；@ 通知已支持（get_at_feed，与「回复我的」按 oid+parent_id 去重）。
