@@ -1754,6 +1754,19 @@ class Bilibili:
         default=True,
         metadata={"description": "直播间是否只回复 @bot 的弹幕（关闭后会对所有弹幕回复，慎用）"},
     )
+    live_event_notify_targets: Optional[List[str]] = field(
+        default_factory=list,
+        metadata={
+            "description": (
+                "直播事件推送到 QQ 的目标列表，格式 group:群号 / private:QQ号；"
+                "留空表示不推送。默认只推礼物/SC/上舰。"
+            )
+        },
+    )
+    live_event_notify_kinds: Optional[List[str]] = field(
+        default_factory=lambda: ["gift", "super_chat", "guard"],
+        metadata={"description": "允许推送到 QQ 的直播事件类型：gift/super_chat/guard/enter/danmaku"},
+    )
 
 
 @dataclass
