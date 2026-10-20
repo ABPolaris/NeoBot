@@ -8,7 +8,9 @@ provider 生成一句极短回复，再由 BilibiliClient.send_danmaku 发出。
 下播时 WSS 可以继续收弹幕（保留历史），但不生成、不发送。
 
 启用房间与定时弹幕持久化在 `<DATA_DIR>/bilibili/live_interact.json`；
-每个房间保留最近 500 条弹幕供 agent / 跨聊天读取（带时间标记）。start() 恢复连接与定时循环。
+每个房间保留最近 500 条弹幕供 agent / 跨聊天读取（带时间标记），另有 100 条
+礼物/SC/上舰/进房事件供 recent_events() 读取，并可通过 on_event 回调实时发出。
+start() 恢复连接与定时循环。
 不 import streaming_parser，也不依赖它的订阅/轮询。
 """
 
@@ -18,10 +20,9 @@ import asyncio
 import contextlib
 import inspect
 import json
-import struct
 import time
-import zlib
 from collections import defaultdict, deque
+from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -29,22 +30,31 @@ from uuid import uuid4
 
 import aiohttp
 
-from neobot_app.bilibili._compat import call_client, get_field, resolve_client
+from neobot_app.bilibili._compat import RecentIds, call_client, get_field, resolve_client
 from neobot_app.bilibili.client import DEFAULT_USER_AGENT
+from neobot_app.bilibili.live_protocol import (
+    LiveEvent,
+    check_auth_reply,
+    decode_packets,
+    encode_packet,
+    event_key,
+    parse_danmu_message,
+    parse_events,
+)
 from neobot_app.bilibili.reply_engine import clean_reply
 from neobot_app.core import DATA_DIR
 from neobot_app.utils.atomic import atomic_write_text
 from neobot_app.utils.logger import get_module_logger
 from neobot_contracts.ports.logging import Logger
 
+__all__ = ("BilibiliLiveInteractor", "decode_packets", "encode_packet", "parse_danmu_message")
+
 _LOGGER = get_module_logger("bilibili.live_interact")
 
-#: 弹幕协议头：总长度 / 头长度 / 协议版本 / 操作码 / 序号。
-_WS_HEADER = struct.Struct(">IHHII")
-_WS_HEADER_SIZE = _WS_HEADER.size
 _WS_OP_HEARTBEAT = 2
 _WS_OP_MESSAGE = 5
 _WS_OP_AUTH = 7
+_WS_OP_AUTH_REPLY = 8
 _WS_HEARTBEAT_SECONDS = 30.0
 _WS_RECONNECT_MAX_SECONDS = 60.0
 _WS_HEALTHY_SECONDS = 60.0
@@ -55,60 +65,13 @@ _REPLY_WINDOW_SECONDS = 60.0
 _LIVE_STATUS_TTL_SECONDS = 60.0
 #: 每房间保留的最近弹幕条数。
 _MAX_HISTORY = 500
+#: 每房间保留的最近非弹幕事件条数。
+_MAX_RECENT_EVENTS = 100
+#: 跨房间事件去重键容量。
+_MAX_EVENT_KEYS = 2000
 #: 定时弹幕检查间隔。
 _SCHEDULE_CHECK_SECONDS = 30.0
 _RECURRENCES = frozenset({"once", "daily", "weekly"})
-
-
-def encode_packet(op: int, body: bytes = b"", protover: int = 1) -> bytes:
-    """组一个 B站弹幕包（16 字节头 + body）。"""
-    payload = bytes(body or b"")
-    return _WS_HEADER.pack(_WS_HEADER_SIZE + len(payload), _WS_HEADER_SIZE, int(protover), int(op), 1) + payload
-
-
-def decode_packets(data: bytes) -> list[tuple[int, bytes]]:
-    """拆弹幕包；protover=2 的 body 会用 zlib 解开并继续拆内部包。"""
-    return _decode_packets(bytes(data or b""), 0)
-
-
-def _decode_packets(data: bytes, depth: int) -> list[tuple[int, bytes]]:
-    if depth > 3:
-        return []
-    packets: list[tuple[int, bytes]] = []
-    offset = 0
-    while offset + _WS_HEADER_SIZE <= len(data):
-        total, header_len, protover, op, _seq = _WS_HEADER.unpack_from(data, offset)
-        if header_len < _WS_HEADER_SIZE or total < header_len or offset + total > len(data):
-            break
-        body = data[offset + header_len : offset + total]
-        if protover == 2:
-            try:
-                packets.extend(_decode_packets(zlib.decompress(body), depth + 1))
-            except zlib.error:
-                pass
-        else:
-            packets.append((op, body))
-        offset += total
-    return packets
-
-
-def parse_danmu_message(payload: Any) -> dict[str, Any] | None:
-    """从 op=5 的 JSON 里取 DANMU_MSG；非弹幕或结构异常返回 None。"""
-    if not isinstance(payload, dict):
-        return None
-    cmd = payload.get("cmd")
-    if not isinstance(cmd, str) or cmd.split(":", 1)[0] != "DANMU_MSG":
-        return None
-    info = payload.get("info")
-    try:
-        text = str(info[1]).strip()  # type: ignore[index]
-        uid = int(info[2][0])  # type: ignore[index]
-        name = str(info[2][1])  # type: ignore[index]
-    except (IndexError, TypeError, ValueError):
-        return None
-    if not text:
-        return None
-    return {"uid": uid, "name": name, "text": text}
 
 
 class BilibiliLiveInteractor:
@@ -128,6 +91,7 @@ class BilibiliLiveInteractor:
         asr_service: Any = None,
         vision_provider: Any = None,
         media_service: Any = None,
+        on_event: Callable[[LiveEvent], Any] | None = None,
     ) -> None:
         # service 可以是 BilibiliService 或 BilibiliClient；每轮用 resolve_client 取当前 client。
         self._service = service
@@ -159,6 +123,10 @@ class BilibiliLiveInteractor:
         self._reply_times: dict[str, deque[float]] = defaultdict(deque)
         self._last_reply_at: dict[str, float] = {}
         self._history: dict[str, deque[dict[str, Any]]] = {}
+        self._recent: dict[str, deque[LiveEvent]] = {}
+        self._event_keys = RecentIds(_MAX_EVENT_KEYS)
+        self._event_tasks: set[asyncio.Task[None]] = set()
+        self._on_event = on_event
         self._live_cache: dict[str, tuple[float, bool]] = {}
         self._schedule_task: asyncio.Task[None] | None = None
         self._loaded = False
@@ -185,16 +153,23 @@ class BilibiliLiveInteractor:
         self._tasks.clear()
         schedule_task = self._schedule_task
         self._schedule_task = None
+        event_tasks = list(self._event_tasks)
+        self._event_tasks.clear()
         for _room_id, task in tasks:
             task.cancel()
         if schedule_task is not None:
             schedule_task.cancel()
+        for task in event_tasks:
+            task.cancel()
         for _room_id, task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         if schedule_task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await schedule_task
+        for task in event_tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         self._logger.info("B站直播交互器已停止")
 
     @property
@@ -345,6 +320,13 @@ class BilibiliLiveInteractor:
             return []
         return [dict(item) for item in list(items)[-limit:]]
 
+    def recent_events(self, room_id: int, count: int = 20) -> list[LiveEvent]:
+        """房间最近的礼物/SC/上舰/进房等事件（旧→新，最多 100 条）。"""
+        rid = _to_int(room_id)
+        limit = max(1, min(_to_int(count) or 20, _MAX_RECENT_EVENTS))
+        items = self._recent.get(str(rid))
+        return list(items)[-limit:] if items else []
+
     def format_history(self, room_id: int, count: int = _MAX_HISTORY) -> str:
         """按群聊风格渲染弹幕：每行带时间，超过 5 分钟间隔插时间线。"""
         items = self.get_history(room_id, count)
@@ -394,6 +376,21 @@ class BilibiliLiveInteractor:
         if description:
             result["description"] = description
         return result
+
+    async def record_clip(self, room_id: int, *, seconds: int = 30) -> dict[str, Any]:
+        """按需录制一小段直播流（默认 30 秒，最长 300 秒）；仅开播时。"""
+        rid = _to_int(room_id)
+        if rid <= 0:
+            return {"ok": False, "error": "房间号无效"}
+        if self._media is None:
+            return {"ok": False, "error": "直播媒体服务未配置"}
+        if not await self.is_live(rid):
+            return {"ok": False, "error": "未开播，不录制"}
+        try:
+            return await call_client(self._media.record_clip, rid, seconds=seconds)
+        except Exception as exc:
+            self._logger.warning("直播录制失败", room_id=rid, error=f"{type(exc).__name__}: {exc}")
+            return {"ok": False, "error": f"直播录制失败：{exc}"}
 
     async def transcribe(self, room_id: int, *, seconds: int = 15) -> dict[str, Any]:
         """按需截取一段直播音频并转写（仅开播时）。"""
@@ -522,10 +519,11 @@ class BilibiliLiveInteractor:
 
     async def _room_loop(self, room_id: str) -> None:
         backoff = 1.0
+        attempt = 0
         while self._running:
             started = time.monotonic()
             try:
-                await self._connect_once(room_id)
+                await self._connect_once(room_id, attempt)
                 if time.monotonic() - started >= _WS_HEALTHY_SECONDS:
                     backoff = 1.0
             except asyncio.CancelledError:
@@ -538,10 +536,12 @@ class BilibiliLiveInteractor:
                 )
             if not self._running:
                 return
+            # host_list 按尝试次数轮换，避免一直撞同一个故障节点。
+            attempt += 1
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, _WS_RECONNECT_MAX_SECONDS)
 
-    async def _connect_once(self, room_id: str) -> None:
+    async def _connect_once(self, room_id: str, attempt: int = 0) -> None:
         client = self._get_client()
         if client is None:
             raise RuntimeError("B站未登录或客户端不可用")
@@ -555,20 +555,24 @@ class BilibiliLiveInteractor:
         hosts = [item for item in info.get("host_list") or [] if isinstance(item, dict) and item.get("host")]
         if not token or not hosts:
             raise RuntimeError("弹幕服务器信息缺少 token/host_list")
-        host = str(hosts[0]["host"])
-        port = _to_int(hosts[0].get("wss_port")) or 443
+        server = hosts[attempt % len(hosts)]
+        host = str(server["host"])
+        port = _to_int(server.get("wss_port")) or 443
         url = f"wss://{host}:{port}/sub"
         uid = _to_int(get_field(client, "my_uid", 0))
+        buvid = str(get_field(client, "buvid3", "") or get_field(client, "_buvid3", "") or "")
         auth = {
             "uid": uid,
             "roomid": real_room_id,
-            "protover": 2,
+            "protover": 3,
             "platform": "web",
             "type": 2,
+            "buvid": buvid,
             "key": token,
         }
+        # token 与 UA 绑定：与 getDanmuInfo 用同一个 UA。
         headers = {
-            "User-Agent": DEFAULT_USER_AGENT,
+            "User-Agent": _client_user_agent(client),
             "Origin": "https://live.bilibili.com",
             "Referer": f"https://live.bilibili.com/{real_room_id}",
         }
@@ -580,7 +584,9 @@ class BilibiliLiveInteractor:
                     async for message in ws:
                         if message.type == aiohttp.WSMsgType.BINARY:
                             for op, body in decode_packets(message.data):
-                                await self._handle_packet(room_id, op, body)
+                                if await self._handle_packet(room_id, op, body):
+                                    # 认证成功后立即补一次心跳，随后交给 30s 定时器。
+                                    await ws.send_bytes(encode_packet(_WS_OP_HEARTBEAT))
                         elif message.type in (
                             aiohttp.WSMsgType.ERROR,
                             aiohttp.WSMsgType.CLOSED,
@@ -601,16 +607,56 @@ class BilibiliLiveInteractor:
             except Exception:
                 return
 
-    async def _handle_packet(self, room_id: str, op: int, body: bytes) -> None:
+    async def _handle_packet(self, room_id: str, op: int, body: bytes) -> bool:
+        """处理一个业务包；返回 True 表示认证成功，需要立即补心跳。"""
+        if op == _WS_OP_AUTH_REPLY:
+            check_auth_reply(body)
+            return True
         if op != _WS_OP_MESSAGE or not body:
-            return
+            return False
         try:
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
+            return False
+        for event in parse_events(payload, _to_int(room_id)):
+            await self._handle_event(room_id, event)
+        return False
+
+    async def _handle_event(self, room_id: str, event: LiveEvent) -> None:
+        """统一事件入口：弹幕走历史/自动回复，其余进 recent_events + on_event。"""
+        if event.kind == "danmaku":
+            await self._handle_danmu(room_id, {"uid": event.uid, "name": event.name, "text": event.text})
             return
-        danmu = parse_danmu_message(payload)
-        if danmu is not None:
-            await self._handle_danmu(room_id, danmu)
+        key = event_key(event)
+        if key and not self._event_keys.add(f"{room_id}:{key}"):
+            return
+        events = self._recent.get(room_id)
+        if events is None:
+            events = self._recent[room_id] = deque(maxlen=_MAX_RECENT_EVENTS)
+        events.append(event)
+        self._emit_event(event)
+
+    def _emit_event(self, event: LiveEvent) -> None:
+        """把事件交给可选回调；异步回调只排任务，不阻塞收包。"""
+        if self._on_event is None:
+            return
+        try:
+            result = self._on_event(event)
+        except Exception as exc:
+            self._logger.warning("B站直播事件回调失败", error=f"{type(exc).__name__}: {exc}")
+            return
+        if inspect.isawaitable(result):
+            task = asyncio.create_task(self._await_event_callback(result))
+            self._event_tasks.add(task)
+            task.add_done_callback(self._event_tasks.discard)
+
+    async def _await_event_callback(self, awaitable: Any) -> None:
+        try:
+            await awaitable
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._logger.warning("B站直播事件回调失败", error=f"{type(exc).__name__}: {exc}")
 
     # ── 自动回复 ──
 
@@ -893,6 +939,17 @@ class BilibiliLiveInteractor:
             atomic_write_text(self._path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         except OSError as exc:
             self._logger.warning("B站直播交互状态保存失败", error=str(exc))
+
+
+def _client_user_agent(client: Any) -> str:
+    """取 client 实际发 HTTP 的 UA，保证 getDanmuInfo 与 WS token 绑定一致。"""
+    ua = str(get_field(client, "user_agent", "") or "")
+    if not ua:
+        session = get_field(client, "_session", None)
+        headers = getattr(session, "headers", None)
+        if headers is not None:
+            ua = str(headers.get("User-Agent") or "")
+    return ua or DEFAULT_USER_AGENT
 
 
 def _normalize_clock(value: Any) -> str | None:
