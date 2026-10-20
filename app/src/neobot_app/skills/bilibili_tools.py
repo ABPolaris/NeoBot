@@ -351,12 +351,14 @@ class _BilibiliToolBase(SkillModule):
         video_service: Any = None,
         archive_service: Any = None,
         uow_factory: Any = None,
+        task_manager: Any = None,
     ) -> None:
         self._service = service
         self._client = client
         self._video_service = video_service
         self._archive = archive_service
         self._uow_factory = uow_factory
+        self._video_tasks = task_manager
 
     def reset(self) -> None:
         pass
@@ -492,7 +494,8 @@ class BilibiliVideoSkill(_BilibiliToolBase):
         return (
             "B站视频 Skill 提供以下能力：\n\n"
             "  video_info — 查视频基本资料：标题、UP主、时长、简介、播放量、链接。\n"
-            "  watch_video — 看视频：拉取B站页面字幕或语音识别转写，默认最多返回 3000 字符；"
+            "  watch_video — 后台看视频：拉取B站页面字幕或语音识别转写（可带评论），"
+            "立即返回 task_id；完成后通过通知管线回到当前聊天流，每群最多并发 3 个，不要重复提交。"
             "超过 3000 字符的完整转写会自动存档，可用 read_video_transcript 按需读取。\n"
             "  read_video_transcript — 读取之前 watch_video 存档的完整转写（按 BV 号）。\n"
             "  video_comments — 拉评论区列表（只读，不自动回复）：comment_type=video（视频，"
@@ -537,7 +540,7 @@ class BilibiliVideoSkill(_BilibiliToolBase):
             ),
             self._tool_def(
                 "watch_video",
-                "看B站视频：拉取视频标题、简介、页面字幕或语音识别转写，并说明内容来源。",
+                "后台看B站视频：拉取标题、简介、页面字幕或语音识别转写（可带评论）；立即返回 task_id，完成后通知当前聊天流。",
                 {
                     "properties": {
                         "identifier": {
@@ -650,7 +653,7 @@ class BilibiliVideoSkill(_BilibiliToolBase):
                             "type": "string",
                             "description": "BV号、av号或视频链接",
                         },
-                        "text": {"type": "string", "description": "评论内容"},
+                        "text": {"type": "string", "description": "评论正文；像真人随口说的短句，不带QQ群号/客服腔/markdown/前后缀，公开场合不透露他人档案或私聊内容"},
                         "root": {
                             "type": "integer",
                             "description": "楼中楼回复的根评论ID，0=发顶级评论",
@@ -918,6 +921,24 @@ async def _handle_watch_video(skill: _BilibiliToolBase, args: dict) -> str:
         return _json({"ok": False, "error": "缺少 identifier（BV号、av号或视频链接）"})
     max_chars = min(max(_to_int(args.get("max_chars")) or 3000, 200), 20000)
     include_comments = min(max(_to_int(args.get("include_comments")), 0), 20)
+    if skill._video_tasks is not None:
+        try:
+            from neobot_app.agent_tools.invocation import CURRENT_INVOCATION
+
+            invocation = CURRENT_INVOCATION.get()
+            context = getattr(invocation, "context", None)
+            flow_key = str(getattr(context, "chat_flow_id", "") or "")
+            if flow_key:
+                return _json(
+                    await skill._video_tasks.submit(
+                        flow_key=flow_key,
+                        identifier=identifier,
+                        max_chars=max_chars,
+                        include_comments=include_comments,
+                    )
+                )
+        except Exception as exc:
+            logger.warning("B站视频后台提交失败，回退同步解析", error=str(exc))
     video = skill._require_video_service()
     kwargs = _call_kwargs(
         video.watch,
