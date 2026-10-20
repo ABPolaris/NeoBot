@@ -141,6 +141,28 @@ class BilibiliLiveSkill(SkillModule):
                 },
             ),
             self._tool_def(
+                "recent_events",
+                "读取直播间最近的礼物/SC/上舰/进房等事件（最多 100 条）。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号"},
+                        "count": {"type": "integer", "description": "读取条数，默认 20", "default": 20},
+                    },
+                    "required": ["room_id"],
+                },
+            ),
+            self._tool_def(
+                "record_clip",
+                "按需录制直播间一小段 FLV（默认 30 秒，最长 300 秒）；仅开播时可用。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号"},
+                        "seconds": {"type": "integer", "description": "录制秒数，默认 30，最大 300", "default": 30},
+                    },
+                    "required": ["room_id"],
+                },
+            ),
+            self._tool_def(
                 "snapshot",
                 "按需获取直播间当前画面的一帧截图；仅开播时可用，返回本地文件路径与可选画面描述。",
                 {
@@ -184,6 +206,10 @@ class BilibiliLiveSkill(SkillModule):
                 return self._list_schedules(live, args)
             if tool_name == "delete_schedule":
                 return await self._delete_schedule(live, args)
+            if tool_name == "recent_events":
+                return self._recent_events(live, args)
+            if tool_name == "record_clip":
+                return await self._record_clip(live, args)
             if tool_name == "snapshot":
                 return await self._snapshot(live, args)
             if tool_name == "transcribe":
@@ -255,6 +281,38 @@ class BilibiliLiveSkill(SkillModule):
                 "display": live.format_history(rid, count),
             }
         )
+
+    def _recent_events(self, live: Any, args: dict[str, Any]) -> str:
+        rid = _room_id(args)
+        try:
+            count = max(1, min(int(args.get("count") or 20), 100))
+        except (TypeError, ValueError):
+            count = 20
+        events = live.recent_events(rid, count)
+        payload = []
+        for event in events or []:
+            payload.append(
+                {
+                    "kind": getattr(event, "kind", ""),
+                    "uid": getattr(event, "uid", 0),
+                    "name": getattr(event, "name", ""),
+                    "text": getattr(event, "text", ""),
+                    "value": getattr(event, "value", 0),
+                    "ts": getattr(event, "ts", 0),
+                }
+            )
+        return _json({"ok": True, "room_id": rid, "count": len(payload), "events": payload})
+
+    async def _record_clip(self, live: Any, args: dict[str, Any]) -> str:
+        rid = _room_id(args)
+        try:
+            seconds = max(5, min(int(args.get("seconds") or 30), 300))
+        except (TypeError, ValueError):
+            seconds = 30
+        result = await live.record_clip(rid, seconds=seconds)
+        payload = dict(result)
+        payload["note"] = "本地录制文件；仅用于回看/留证，不自动发送"
+        return _json(payload)
 
     async def _snapshot(self, live: Any, args: dict[str, Any]) -> str:
         rid = _room_id(args)
