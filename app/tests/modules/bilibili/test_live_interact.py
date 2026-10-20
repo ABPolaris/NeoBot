@@ -9,6 +9,8 @@ import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from neobot_app.bilibili import live_interact
 from neobot_app.bilibili.live_interact import (
     BilibiliLiveInteractor,
@@ -16,6 +18,7 @@ from neobot_app.bilibili.live_interact import (
     encode_packet,
     parse_danmu_message,
 )
+from neobot_app.bilibili.live_protocol import LiveAuthError
 
 _ROOM_INFO = {
     "room_info": {"room_id": 21452505, "title": "测试直播间", "live_status": 1},
@@ -36,11 +39,14 @@ class _FakeClient:
         danmu_info: dict | None = None,
         my_uid: int = 7,
         send_ok: bool = True,
+        buvid3: str = "buv-3",
     ) -> None:
         self.room_info = _ROOM_INFO if room_info is None else room_info
         self.danmu_info = danmu_info or {}
         self.my_uid = my_uid
         self.send_ok = send_ok
+        self.buvid3 = buvid3
+        self.user_agent = live_interact.DEFAULT_USER_AGENT
         self.room_calls: list[int] = []
         self.sent: list[tuple[int, str]] = []
 
@@ -309,12 +315,135 @@ async def test_websocket_auth_packet_and_danmu_flow(tmp_path: Path, monkeypatch)
     assert json.loads(body) == {
         "uid": 7,
         "roomid": 21452505,
-        "protover": 2,
+        "protover": 3,
         "platform": "web",
         "type": 2,
+        "buvid": "buv-3",
         "key": "live-token",
     }
     assert client.sent == [(5440, "来了")]
+
+
+async def test_auth_reply_code_and_immediate_heartbeat(tmp_path: Path, monkeypatch) -> None:
+    client = _FakeClient(
+        danmu_info={
+            "token": "live-token",
+            "host_list": [{"host": "broadcastlv.chat.bilibili.com", "wss_port": 443}],
+        }
+    )
+    interactor = BilibiliLiveInteractor(client, data_dir=tmp_path)
+    await interactor.enable(5440)
+    reply = encode_packet(8, json.dumps({"code": 0}).encode("utf-8"))
+    ws = _FakeWS([type("Msg", (), {"type": live_interact.aiohttp.WSMsgType.BINARY, "data": reply})()])
+    session = _FakeSession(ws)
+    monkeypatch.setattr(live_interact.aiohttp, "ClientSession", lambda *a, **k: session)
+
+    await interactor._connect_once("5440")
+
+    assert session.headers["User-Agent"] == client.user_agent
+    assert [op for op, _body in decode_packets(ws.sent[0])] == [7]
+    assert [op for op, _body in decode_packets(ws.sent[1])] == [2]
+    assert len(ws.sent) == 2
+
+    bad = encode_packet(8, json.dumps({"code": -101}).encode("utf-8"))
+    bad_ws = _FakeWS([type("Msg", (), {"type": live_interact.aiohttp.WSMsgType.BINARY, "data": bad})()])
+    monkeypatch.setattr(live_interact.aiohttp, "ClientSession", lambda *a, **k: _FakeSession(bad_ws))
+    with pytest.raises(LiveAuthError):
+        await interactor._connect_once("5440")
+
+
+async def test_host_list_rotates_by_attempt(tmp_path: Path, monkeypatch) -> None:
+    client = _FakeClient(
+        danmu_info={
+            "token": "live-token",
+            "host_list": [
+                {"host": "host-a", "wss_port": 443},
+                {"host": "host-b", "wss_port": 8443},
+            ],
+        }
+    )
+    interactor = BilibiliLiveInteractor(client, data_dir=tmp_path)
+    await interactor.enable(5440)
+    sessions: list[_FakeSession] = []
+
+    def _factory(*args: object, **kwargs: object) -> _FakeSession:
+        session = _FakeSession(_FakeWS([]))
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(live_interact.aiohttp, "ClientSession", _factory)
+    await interactor._connect_once("5440", 0)
+    await interactor._connect_once("5440", 1)
+
+    assert [session.url for session in sessions] == [
+        "wss://host-a:443/sub",
+        "wss://host-b:8443/sub",
+    ]
+
+
+def _gift_body(index: int) -> bytes:
+    payload = {
+        "cmd": "SEND_GIFT",
+        "data": {
+            "uid": 8,
+            "uname": "观众",
+            "giftName": f"礼物{index}",
+            "num": 1,
+            "total_coin": 100,
+            "rnd": f"r{index}",
+            "tid": f"t{index}",
+            "timestamp": 1700000000,
+        },
+    }
+    return json.dumps(payload).encode("utf-8")
+
+
+async def test_recent_events_dedupes_gift_and_emits_callback(tmp_path: Path) -> None:
+    seen = []
+    client = _FakeClient()
+    interactor = BilibiliLiveInteractor(client, data_dir=tmp_path, on_event=seen.append)
+    await interactor.enable(5440, auto_reply=False)
+
+    body = _gift_body(1)
+    await interactor._handle_packet("5440", 5, body)
+    await interactor._handle_packet("5440", 5, body)  # 重复投递按 rnd/tid 去重
+    super_chat = {
+        "cmd": "SUPER_CHAT_MESSAGE",
+        "data": {
+            "uid": 9,
+            "price": 30,
+            "message": "加油",
+            "id": 100,
+            "start_time": 1700000001,
+            "user_info": {"uname": "老板"},
+        },
+    }
+    await interactor._handle_packet("5440", 5, json.dumps(super_chat).encode("utf-8"))
+    mirror = {"cmd": "DANMU_MSG_MIRROR", "info": [[], "镜像", [10, "别人"]]}
+    await interactor._handle_packet("5440", 5, json.dumps(mirror).encode("utf-8"))
+
+    events = interactor.recent_events(5440)
+    assert [event.kind for event in events] == ["gift", "super_chat"]
+    assert events[0].text == "礼物1"
+    assert events[0].value == 100
+    assert events[1].name == "老板"
+    assert events[1].value == 30
+    assert seen == events
+    assert interactor.get_history(5440) == []
+
+
+async def test_recent_events_keeps_latest_100(tmp_path: Path) -> None:
+    interactor = BilibiliLiveInteractor(_FakeClient(), data_dir=tmp_path)
+    await interactor.enable(5440, auto_reply=False)
+    for index in range(105):
+        await interactor._handle_packet("5440", 5, _gift_body(index))
+
+    events = interactor.recent_events(5440, 100)
+    assert len(events) == 100
+    assert events[0].text == "礼物5"
+    assert events[-1].text == "礼物104"
+    assert interactor.recent_events(5440, 2)[-1].text == "礼物104"
+    assert interactor.recent_events(9999) == []
 
 
 async def test_reply_is_cleaned_and_truncated(tmp_path: Path) -> None:
@@ -523,9 +652,7 @@ class _FakeVision:
 
 async def test_reply_chain_captures_frame_context(tmp_path: Path) -> None:
     provider = _FakeProvider("欢迎")
-    interactor, client, _ = await _enabled(
-        tmp_path, provider=provider, at_only=False
-    )
+    interactor, client, _ = await _enabled(tmp_path, provider=provider, at_only=False)
     media = _FakeMedia()
     vision = _FakeVision()
     interactor._media = media
