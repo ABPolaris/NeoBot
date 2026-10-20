@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import re
 import threading
 import time
 from collections import defaultdict
@@ -36,6 +37,12 @@ _VIDEO_COMMENTS_URL = f"{API_BASE}/x/v2/reply/main"
 _COMMENT_ADD_URL = f"{API_BASE}/x/v2/reply/add"
 _DYNAMIC_CREATE_URL = f"{API_BASE}/x/dynamic/feed/create/dyn"
 _DYNAMIC_IMAGE_UPLOAD_URL = f"{API_BASE}/x/dynamic/feed/draw/upload_bfs"
+_SEARCH_URL = f"{API_BASE}/x/web-interface/wbi/search/type"
+_VIDEO_VIEW_URL = f"{API_BASE}/x/web-interface/view"
+_SPACE_INFO_URL = f"{API_BASE}/x/space/wbi/acc/info"
+_SPACE_VIDEOS_URL = f"{API_BASE}/x/space/arc/search"
+_PLAYER_INFO_URL = f"{API_BASE}/x/player/wbi/v2"
+_PLAYURL_URL = f"{API_BASE}/x/player/wbi/playurl"
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -55,6 +62,28 @@ _WBI_FILTERED_CHARS = frozenset("!'()*")
 
 #: 命中这些业务错误码时加大写操作冷却时间（风控/评论限流）。
 _WRITE_RETRY_CODES = frozenset({-412, -799})
+
+_BV_PATTERN = re.compile(r"(?i)bv1[0-9a-z]{9}")
+_AV_PATTERN = re.compile(r"(?i)(?<![0-9a-z])av(\d+)")
+
+
+def _to_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def parse_video_id(identifier: str) -> tuple[str, int]:
+    """解析 BV 号 / av 号 / 视频 URL，返回 (bvid, aid)；识别失败返回 ("", 0)。"""
+    text = (identifier or "").strip()
+    match = _BV_PATTERN.search(text)
+    if match:
+        return "BV" + match.group(0)[2:], 0
+    match = _AV_PATTERN.search(text)
+    if match:
+        return "", int(match.group(1))
+    return "", 0
 
 
 @dataclass
@@ -302,6 +331,198 @@ class BilibiliClient:
         data = payload.get("data")
         rpid = data.get("rpid") if isinstance(data, dict) else 0
         self._logger.info(f"B站评论回复成功: oid={oid} root={root} parent={parent} rpid={rpid}")
+        return True
+
+    # ── 搜索 / 视频 / 用户空间 ──
+
+    def search(
+        self,
+        keyword: str,
+        *,
+        search_type: str = "video",
+        page: int = 1,
+        page_size: int = 20,
+        order: str = "totalrank",
+    ) -> dict[str, Any]:
+        """综合搜索，返回 data 原样（视频搜索的结果在 data["result"]）；失败返回空 dict。"""
+        text = (keyword or "").strip()
+        if not text:
+            return {}
+        params = self._sign_wbi(
+            {
+                "search_type": search_type or "video",
+                "keyword": text,
+                "page": max(int(page), 1),
+                "page_size": max(int(page_size), 1),
+                "order": order or "totalrank",
+            }
+        )
+        try:
+            payload = self._fetch(
+                "GET",
+                _SEARCH_URL,
+                params=params,
+                headers={"Referer": "https://search.bilibili.com/"},
+            )
+        except BilibiliError as exc:
+            self._log_read_error("视频搜索", exc)
+            return {}
+        data = payload.get("data")
+        return data if isinstance(data, dict) else {}
+
+    def get_video_info(self, identifier: str) -> dict[str, Any]:
+        """视频信息（view 接口的 data）；identifier 支持 BV 号 / av 号 / 视频 URL。"""
+        bvid, aid = parse_video_id(identifier)
+        if not bvid and not aid:
+            self._logger.warning(f"B站视频号解析失败: {identifier!r}")
+            return {}
+        params: dict[str, Any] = {"bvid": bvid} if bvid else {"aid": aid}
+        try:
+            payload = self._fetch("GET", _VIDEO_VIEW_URL, params=params)
+        except BilibiliError as exc:
+            self._log_read_error("视频信息读取", exc)
+            return {}
+        data = payload.get("data")
+        return data if isinstance(data, dict) else {}
+
+    def get_space_info(self, mid: int) -> dict[str, Any]:
+        """用户空间信息（space/wbi/acc/info 的 data）；失败返回空 dict。"""
+        if not mid:
+            return {}
+        params = self._sign_wbi({"mid": int(mid)})
+        try:
+            payload = self._fetch(
+                "GET",
+                _SPACE_INFO_URL,
+                params=params,
+                headers={"Referer": f"https://space.bilibili.com/{int(mid)}"},
+            )
+        except BilibiliError as exc:
+            self._log_read_error("用户空间信息读取", exc)
+            return {}
+        data = payload.get("data")
+        return data if isinstance(data, dict) else {}
+
+    def get_user_videos(
+        self, mid: int, *, page: int = 1, page_size: int = 20
+    ) -> list[dict[str, Any]]:
+        """用户投稿视频（space/arc/search 的 vlist）；失败返回空列表。"""
+        if not mid:
+            return []
+        params = {
+            "mid": int(mid),
+            "ps": max(int(page_size), 1),
+            "pn": max(int(page), 1),
+            "order": "pubdate",
+        }
+        try:
+            payload = self._fetch(
+                "GET",
+                _SPACE_VIDEOS_URL,
+                params=params,
+                headers={"Referer": f"https://space.bilibili.com/{int(mid)}"},
+            )
+        except BilibiliError as exc:
+            self._log_read_error("用户投稿读取", exc)
+            return []
+        data = payload.get("data")
+        listing = data.get("list") if isinstance(data, dict) else None
+        vlist = listing.get("vlist") if isinstance(listing, dict) else None
+        return [item for item in vlist or [] if isinstance(item, dict)]
+
+    def get_player_info(self, bvid: str, cid: int) -> dict[str, Any]:
+        """播放器信息（player/wbi/v2 的 data）；字幕在 data["subtitle"]["subtitles"]。"""
+        bvid = (bvid or "").strip()
+        if not bvid or not cid:
+            return {}
+        params = self._sign_wbi({"bvid": bvid, "cid": int(cid)})
+        try:
+            payload = self._fetch(
+                "GET",
+                _PLAYER_INFO_URL,
+                params=params,
+                headers={"Referer": f"https://www.bilibili.com/video/{bvid}"},
+            )
+        except BilibiliError as exc:
+            self._log_read_error("播放器信息读取", exc)
+            return {}
+        data = payload.get("data")
+        return data if isinstance(data, dict) else {}
+
+    def get_playurl_audio(self, bvid: str, cid: int) -> str | None:
+        """DASH 音频流地址：取 bandwidth 最大的一条；失败返回 None。"""
+        bvid = (bvid or "").strip()
+        if not bvid or not cid:
+            return None
+        params = self._sign_wbi(
+            {"bvid": bvid, "cid": int(cid), "fnval": 16, "fourk": 1}
+        )
+        try:
+            payload = self._fetch(
+                "GET",
+                _PLAYURL_URL,
+                params=params,
+                headers={"Referer": f"https://www.bilibili.com/video/{bvid}"},
+            )
+        except BilibiliError as exc:
+            self._log_read_error("音频地址读取", exc)
+            return None
+        data = payload.get("data")
+        dash = data.get("dash") if isinstance(data, dict) else None
+        audios = dash.get("audio") if isinstance(dash, dict) else None
+        best = max(
+            (
+                item
+                for item in audios or []
+                if isinstance(item, dict) and (item.get("base_url") or item.get("baseUrl"))
+            ),
+            key=lambda item: _to_int(item.get("bandwidth")),
+            default=None,
+        )
+        if not best:
+            return None
+        return str(best.get("base_url") or best.get("baseUrl"))
+
+    def fetch_text(self, url: str) -> str | None:
+        """下载文本资源（字幕 JSON 等）；失败返回 None。"""
+        if not url:
+            return None
+        response = self._request("GET", url)
+        if response is None or response.status_code >= 400:
+            self._logger.warning(f"B站文本下载失败: {url}")
+            return None
+        try:
+            return response.text
+        except (requests.RequestException, OSError, ValueError) as exc:
+            self._logger.warning(f"B站文本下载失败: {url}（{exc}）")
+            return None
+
+    def download_file(self, url: str, path: Path) -> bool:
+        """把 url 流式下载到 path；失败返回 False 并清理半成品。"""
+        target = Path(path)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # shortcut: 下载期间不持锁（长任务会卡住其它请求），同一 Session 的并发流式读取
+            # 未额外保护；需要更强并发保证时给下载单独开 Session。
+            with self._lock:
+                response = self._session.get(url, stream=True, timeout=self._timeout)
+            try:
+                if response.status_code >= 400:
+                    self._logger.warning(f"B站文件下载失败: HTTP {response.status_code} {url}")
+                    return False
+                with target.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1 << 16):
+                        if chunk:
+                            handle.write(chunk)
+            finally:
+                response.close()
+        except (requests.RequestException, OSError) as exc:
+            self._logger.warning(f"B站文件下载失败: {url}（{exc}）")
+            target.unlink(missing_ok=True)
+            return False
+        if not target.is_file() or target.stat().st_size <= 0:
+            target.unlink(missing_ok=True)
+            return False
         return True
 
     # ── 私信 ──

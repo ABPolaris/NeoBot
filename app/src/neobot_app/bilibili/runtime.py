@@ -13,11 +13,17 @@ from typing import Any
 from neobot_app.bilibili.channel import BilibiliCrossChatChannel
 from neobot_app.bilibili.comment_monitor import BilibiliCommentMonitor
 from neobot_app.bilibili.diary import BilibiliDiaryService, BilibiliDiarySkill
+from neobot_app.bilibili.media import BilibiliVideoService
 from neobot_app.bilibili.private_monitor import BilibiliPrivateMonitor
 from neobot_app.bilibili.reply_engine import BilibiliReplyEngine
 from neobot_app.bilibili.service import BilibiliService
 from neobot_app.skills.bilibili_link import BilibiliLinkSkill
 from neobot_app.skills.bilibili_memory import BilibiliMemorySkill
+from neobot_app.skills.bilibili_tools import (
+    BilibiliSearchSkill,
+    BilibiliUserSkill,
+    BilibiliVideoSkill,
+)
 from neobot_contracts.ports.logging import Logger, NullLogger
 
 
@@ -37,6 +43,7 @@ class BilibiliRuntime:
         archive_service: Any,
         uow_factory: Any,
         command_service: Any,
+        asr_service: Any = None,
         logger: Logger | None = None,
         bot_name: str = "",
         bot_data: str = "",
@@ -47,10 +54,17 @@ class BilibiliRuntime:
         self._started = False
         cfg = getattr(config, "bilibili", None)
         self.service = BilibiliService(cfg, logger=self._logger)
+        self.video_service = BilibiliVideoService(
+            self.service,
+            asr_service=asr_service,
+            archive_service=archive_service,
+            logger=self._logger,
+        )
         self.engine = BilibiliReplyEngine(
             provider,
             archive_service=archive_service,
             uow_factory=uow_factory,
+            video_service=self.video_service,
             bot_name=bot_name,
             bot_uid=0,
             bot_data=bot_data,
@@ -306,4 +320,23 @@ def build_bilibili_skills(
         pass
     if runtime is not None:
         skills.append(runtime.diary_skill)
+        for factory in (
+            lambda: BilibiliSearchSkill(
+                service=runtime.service, video_service=runtime.video_service
+            ),
+            lambda: BilibiliVideoSkill(
+                service=runtime.service,
+                video_service=runtime.video_service,
+                archive_service=archive_service,
+            ),
+            lambda: BilibiliUserSkill(
+                service=runtime.service,
+                archive_service=archive_service,
+                uow_factory=uow_factory,
+            ),
+        ):
+            try:
+                skills.append(factory())
+            except Exception:
+                pass
     return skills

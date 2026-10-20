@@ -1,8 +1,7 @@
-"""BilibiliCommentMonitor 测试：默认关闭、去重、单轮上限、冷却、退避、@通知。"""
+"""BilibiliCommentMonitor 测试：默认关闭、去重、回复池、单轮上限、冷却、退避、@通知。"""
 
 from __future__ import annotations
 
-import time
 from types import SimpleNamespace
 
 from neobot_app.bilibili.comment_monitor import (
@@ -121,7 +120,6 @@ def _monitor(client, engine=None, **kwargs) -> BilibiliCommentMonitor:
         "poll_interval_seconds": 1800,
         "max_replies_per_poll": 3,
         "reply_cooldown_seconds": 0,
-        "start_time": 0,
     }
     values.update(kwargs)
     return BilibiliCommentMonitor(client, engine or FakeEngine(), **values)
@@ -170,21 +168,41 @@ async def test_own_comment_is_skipped() -> None:
     assert client.sent == []
 
 
-async def test_stale_notification_is_skipped() -> None:
-    client = FakeClient([feed_item(notification_id=1, reply_time=int(time.time()) - 1000)])
-    monitor = _monitor(client, start_time=int(time.time()))
+async def test_old_notification_is_not_dropped_by_start_time() -> None:
+    # 之前没回复的旧评论也进池回复，不再因早于监控启动时间被丢。
+    client = FakeClient([feed_item(notification_id=1, reply_time=1)])
+    monitor = _monitor(client)
 
-    assert await monitor.poll_once() == 0
-    assert client.sent == []
+    assert await monitor.poll_once() == 1
+    assert len(client.sent) == 1
 
 
-async def test_max_replies_per_poll() -> None:
+async def test_max_replies_per_poll_queues_the_rest_for_next_poll() -> None:
     client = FakeClient(
         [feed_item(notification_id=i, oid=10 + i, parent=100 + i) for i in range(5)]
     )
     monitor = _monitor(client, max_replies_per_poll=2)
 
     assert await monitor.poll_once() == 2
+    assert monitor.status()["pending"] == 3
+    assert await monitor.poll_once() == 2
+    assert monitor.status()["pending"] == 1
+    assert await monitor.poll_once() == 1
+    assert monitor.status()["pending"] == 0
+    assert await monitor.poll_once() == 0
+    assert len(client.sent) == 5
+
+
+async def test_pending_pool_is_bounded() -> None:
+    client = FakeClient(
+        [feed_item(notification_id=i, oid=i, parent=i) for i in range(1, 1002)]
+    )
+    monitor = _monitor(client, max_replies_per_poll=1)
+
+    assert await monitor.poll_once() == 1
+    assert monitor.status()["pending"] == 999
+    assert await monitor.poll_once() == 1
+    assert monitor.status()["pending"] <= 1000
     assert len(client.sent) == 2
 
 
@@ -217,10 +235,12 @@ async def test_send_failure_increases_backoff_and_retries_next_poll() -> None:
     monitor = _monitor(client)
 
     assert await monitor.poll_once() == 0
+    assert monitor.status()["pending"] == 1
     assert monitor.next_poll_interval == 3600
 
     client.fail_send = False
     assert await monitor.poll_once() == 1
+    assert monitor.status()["pending"] == 0
     assert monitor.next_poll_interval == 1800
 
 
@@ -300,6 +320,29 @@ def test_default_poll_interval_is_1800() -> None:
     assert BilibiliCommentMonitor(poll_interval_seconds=0).next_poll_interval == 1800
     cfg = SimpleNamespace(bilibili=SimpleNamespace())
     assert BilibiliCommentMonitor.from_config(None, None, cfg).next_poll_interval == 1800
+
+
+async def test_default_max_replies_per_poll_is_50() -> None:
+    client = FakeClient(
+        [feed_item(notification_id=i, oid=i, parent=i) for i in range(1, 61)]
+    )
+    monitor = BilibiliCommentMonitor(client, FakeEngine(), enabled=True)
+
+    assert await monitor.poll_once() == 50
+    assert monitor.status()["pending"] == 10
+
+
+async def test_from_config_defaults_to_50_replies() -> None:
+    client = FakeClient(
+        [feed_item(notification_id=i, oid=i, parent=i) for i in range(1, 61)]
+    )
+    cfg = SimpleNamespace(bilibili=SimpleNamespace())
+    monitor = BilibiliCommentMonitor.from_config(
+        client, FakeEngine(), cfg, enabled=True
+    )
+
+    assert await monitor.poll_once() == 50
+    assert monitor.status()["pending"] == 10
 
 
 def test_parse_at_feed_item_maps_at_time_and_source_content() -> None:

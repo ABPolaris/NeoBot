@@ -692,6 +692,8 @@ def test_human_feel_and_stale_topic_are_enabled_by_default_and_documented(tmp_pa
     assert store.enabled("human_feel") is True
     for banned in ("调调", "够狠的", "xx归xx，但xxx", "好歹xx"):
         assert banned in human_feel, banned
+    for banned in ('听着xx', '实际上xx'):
+        assert banned in human_feel, banned
     assert "禁止插话" in human_feel
     assert "严禁任何形式的不懂装懂" in human_feel
     assert template_placeholders(human_feel) == set()

@@ -4,6 +4,7 @@
 - BilibiliQrLogin：passport 二维码登录（同步原子操作 + 异步轮询）；
 - BilibiliClient：B 站 Web API 同步客户端（asyncio.to_thread 包装由服务层负责）；
 - BilibiliService：async 门面，负责登录态/休眠状态与动态发布；
+- BilibiliVideoService：视频理解（信息 + 站点字幕/ASR 转写 + 热门评论）；
 - BilibiliCookieStore：<DATA_DIR>/bilibili/cookies.json 的读写。
 """
 
@@ -12,6 +13,7 @@ from __future__ import annotations
 from .client import BilibiliClient, BilibiliMessage, BilibiliSession
 from .cookie_provider import BilibiliCookieStore
 from .errors import BilibiliApiError, BilibiliAuthError, BilibiliError
+from .media import BilibiliVideoService
 from .qr_login import (
     QR_STATE_EXPIRED,
     QR_STATE_PENDING,
@@ -38,6 +40,7 @@ __all__ = [
     "BilibiliQrLogin",
     "BilibiliService",
     "BilibiliSession",
+    "BilibiliVideoService",
     "QrCodeLogin",
     "QrPollResult",
     "make_qr_png",

@@ -1705,8 +1705,8 @@ class Bilibili:
         metadata={"description": "二维码登录等待超时（秒）"},
     )
     max_replies_per_poll: int = field(
-        default=3,
-        metadata={"description": "每轮最多回复多少条，防止失控"},
+        default=50,
+        metadata={"description": "每轮最多回复多少条（积压会进入回复池，下一轮继续）"},
     )
     reply_cooldown_seconds: float = field(
         default=60.0,

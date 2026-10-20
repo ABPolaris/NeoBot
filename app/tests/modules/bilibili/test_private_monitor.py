@@ -1,9 +1,8 @@
-"""BilibiliPrivateMonitor 测试：默认关闭、跳过自己/旧消息、去重、合并多条、发送。"""
+"""BilibiliPrivateMonitor 测试：默认关闭、跳过自己、旧消息不丢、去重、合并多条、发送。"""
 
 from __future__ import annotations
 
 import json
-import time
 from types import SimpleNamespace
 
 from neobot_app.bilibili.private_monitor import BilibiliPrivateMonitor
@@ -72,7 +71,6 @@ def _monitor(client, engine=None, **kwargs) -> BilibiliPrivateMonitor:
         "poll_interval_seconds": 1800,
         "max_replies_per_poll": 3,
         "reply_cooldown_seconds": 0,
-        "start_time": 0,
     }
     values.update(kwargs)
     return BilibiliPrivateMonitor(client, engine or FakeEngine(), **values)
@@ -102,23 +100,26 @@ async def test_new_message_generates_and_sends() -> None:
     assert any(item["content"] == "在吗" for item in ctx.history)
 
 
-async def test_self_and_old_messages_are_skipped() -> None:
-    now = int(time.time())
+async def test_self_message_is_skipped() -> None:
     client = FakeClient(
         [session()],
-        {
-            55: [
-                message(FakeClient.my_uid, "我自己说的", timestamp=now),
-                message(55, "旧消息", timestamp=now - 1000),
-            ]
-        },
+        {55: [message(FakeClient.my_uid, "我自己说的", timestamp=100)]},
     )
     engine = FakeEngine()
-    monitor = _monitor(client, engine, start_time=now)
+    monitor = _monitor(client, engine)
 
     assert await monitor.poll_once() == 0
     assert client.sent == []
     assert engine.contexts == []
+
+
+async def test_old_message_is_not_dropped_by_start_time() -> None:
+    # 之前没回复的旧私信也回，不再因早于监控启动时间被丢。
+    client = FakeClient([session()], {55: [message(55, "旧消息", timestamp=1)]})
+    monitor = _monitor(client)
+
+    assert await monitor.poll_once() == 1
+    assert client.sent == [(55, "在的")]
 
 
 async def test_duplicate_message_is_not_answered_twice() -> None:
@@ -163,23 +164,36 @@ async def test_skip_from_engine_marks_processed() -> None:
     assert len(engine.contexts) == 1
 
 
-async def test_send_failure_increases_backoff() -> None:
-    client = FakeClient([session()], {55: [message(55, "在吗", timestamp=100)]}, fail_send=True)
+async def test_send_failure_increases_backoff_and_retries_next_poll() -> None:
+    client = FakeClient(
+        [session()], {55: [message(55, "在吗", timestamp=100)]}, fail_send=True
+    )
     monitor = _monitor(client)
 
     assert await monitor.poll_once() == 0
+    assert monitor.status()["pending_sessions"] == 1
     assert monitor.next_poll_interval == 3600
 
+    client.fail_send = False
+    assert await monitor.poll_once() == 1
+    assert monitor.status()["pending_sessions"] == 0
+    assert monitor.status()["processed_messages"] == 1
 
-async def test_max_replies_per_poll() -> None:
+
+async def test_max_replies_per_poll_continues_next_poll() -> None:
     client = FakeClient(
         [session(55), session(66), session(77)],
-        {55: [message(55, "a", timestamp=100)], 66: [message(66, "b", timestamp=100)], 77: [message(77, "c", timestamp=100)]},
+        {
+            55: [message(55, "a", timestamp=100)],
+            66: [message(66, "b", timestamp=100)],
+            77: [message(77, "c", timestamp=100)],
+        },
     )
     monitor = _monitor(client, max_replies_per_poll=2)
 
     assert await monitor.poll_once() == 2
-    assert len(client.sent) == 2
+    assert await monitor.poll_once() == 1
+    assert len(client.sent) == 3
 
 
 def test_default_poll_interval_is_1800() -> None:
@@ -187,6 +201,59 @@ def test_default_poll_interval_is_1800() -> None:
     assert BilibiliPrivateMonitor(poll_interval_seconds=0).next_poll_interval == 1800
     cfg = SimpleNamespace(bilibili=SimpleNamespace())
     assert BilibiliPrivateMonitor.from_config(None, None, cfg).next_poll_interval == 1800
+
+
+def test_default_limits_are_50() -> None:
+    cfg = SimpleNamespace(bilibili=SimpleNamespace())
+    monitor = BilibiliPrivateMonitor.from_config(None, None, cfg)
+    assert monitor._max_per_poll == 50
+    assert monitor._session_check_count == 50
+
+
+async def test_session_check_count_defaults_to_50() -> None:
+    class CountingClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.counts: list[int] = []
+
+        def get_sessions(self, count: int = 30):
+            self.counts.append(count)
+            return []
+
+    client = CountingClient()
+    monitor = BilibiliPrivateMonitor(client, FakeEngine(), enabled=True)
+
+    assert await monitor.poll_once() == 0
+    assert client.counts == [50]
+
+
+async def test_default_max_replies_per_poll_is_50() -> None:
+    talkers = list(range(1000, 1060))
+    client = FakeClient(
+        [session(talker) for talker in talkers],
+        {talker: [message(talker, f"m{talker}", timestamp=100)] for talker in talkers},
+    )
+    monitor = BilibiliPrivateMonitor(client, FakeEngine(), enabled=True)
+
+    assert await monitor.poll_once() == 50
+    assert len(client.sent) == 50
+    assert await monitor.poll_once() == 10
+    assert len(client.sent) == 60
+
+
+async def test_from_config_defaults_to_50_replies() -> None:
+    talkers = list(range(1000, 1060))
+    client = FakeClient(
+        [session(talker) for talker in talkers],
+        {talker: [message(talker, f"m{talker}", timestamp=100)] for talker in talkers},
+    )
+    cfg = SimpleNamespace(bilibili=SimpleNamespace())
+    monitor = BilibiliPrivateMonitor.from_config(
+        client, FakeEngine(), cfg, enabled=True
+    )
+
+    assert await monitor.poll_once() == 50
+    assert len(client.sent) == 50
 
 
 async def test_start_stop_lifecycle() -> None:

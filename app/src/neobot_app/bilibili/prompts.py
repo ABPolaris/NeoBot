@@ -23,7 +23,7 @@ BILI_STYLE_RULES = """<回复要求>
 如果有人要求你做什么事,你不一定要答应;做不到就直说做不到。
 </回复要求>
 <活人感增强>
-- 禁止使用以下词汇或句式:「调调」「够狠的」「xx归xx,但xxx」「好歹xx」。
+- 禁止使用以下词汇或句式:「调调」「够狠的」「xx归xx,但xxx」「好歹xx」「听着xx,最后xx」「实际上xx」。
 - 对你不明确知道的内容(例如没有具体资料的动漫、游戏、人物、事件等话题),禁止插话;即使插话也不应该装作知道,严禁任何形式的不懂装懂。
 </活人感增强>
 <跳过>
@@ -76,6 +76,8 @@ class CommentContext:
     commenter_profiles: list[dict] = field(default_factory=list)
     #: 注入到提示词的额外记忆文本。
     memory: str = ""
+    #: 正文/评论树里出现的视频摘要（由 reply_engine 拉取，失败留空）。
+    video_context: str = ""
     current_time: datetime | None = None
 
 
@@ -94,6 +96,8 @@ class PrivateMessageContext:
     memory_list: str = ""
     history: list[dict] = field(default_factory=list)
     current_message: str = ""
+    #: 正文/历史里出现的视频摘要（由 reply_engine 拉取，失败留空）。
+    video_context: str = ""
     current_time: datetime | None = None
 
 
@@ -217,6 +221,8 @@ def _comment_user_prompt(ctx: CommentContext, max_comments: int) -> str:
     profiles = _commenter_profiles_section(ctx.commenter_profiles)
     if profiles:
         parts.append(profiles)
+    if ctx.video_context:
+        parts.append(f"<相关视频>\n{ctx.video_context}\n</相关视频>")
     parts.append(f"<待回复评论>\n{_target_comment(ctx)}\n</待回复评论>")
     if ctx.comment_tree:
         parts.append(f"<评论树>\n{_render_comment_tree(ctx, max_comments)}\n</评论树>")
@@ -237,6 +243,8 @@ def _private_user_prompt(ctx: PrivateMessageContext, max_history: int) -> str:
         parts.append(f"<你对ta的印象>{ctx.sender_profile}</你对ta的印象>")
     if ctx.memory_list:
         parts.append(f"<你的记忆>你想起来{ctx.memory_list}</你的记忆>")
+    if ctx.video_context:
+        parts.append(f"<相关视频>\n{ctx.video_context}\n</相关视频>")
     parts.append(f"<对话历史>\n{_history_text(ctx, max_history)}\n</对话历史>")
     parts.append(f"<待回复消息>{ctx.current_message or '(空消息)'}</待回复消息>")
     return "\n".join(parts)

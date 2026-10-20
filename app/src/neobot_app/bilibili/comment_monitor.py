@@ -2,9 +2,10 @@
 
 默认关闭（config.bilibili.comment_reply_enabled=false）。开启后每
 poll_interval_seconds（默认 1800s）检查一次「回复我的」与「@我的」通知，
-只处理新出现、发给 bot 的评论：
-每轮最多 max_replies_per_poll 条、按通知/评论去重、同一楼中楼有回复冷却，
-接口失败按指数退避（上限 1 小时）。生成与发送分别走 reply_engine / client。
+只处理发给 bot 的评论：每轮最多回复 max_replies_per_poll 条（默认 50），
+本轮没轮到的进待回复池（上限 1000）下一轮继续；按通知/评论去重、同一楼中楼
+有回复冷却，接口失败按指数退避（上限 1 小时）。生成与发送分别走
+reply_engine / client。
 """
 
 from __future__ import annotations
@@ -29,8 +30,8 @@ logger = get_module_logger("bilibili.comment_monitor")
 #: reply_feed/at_feed 的 business_id -> 内容类型名。
 BUSINESS_TYPES = {1: "视频", 11: "动态", 12: "专栏", 17: "动态"}
 _MAX_BACKOFF_SECONDS = 3600.0
-#: 启动时允许回看多久内的通知（秒）；更早的历史一律不回复，避免重启后翻旧账。
-_STARTUP_GRACE_SECONDS = 0
+#: 待回复池上限；满了以后新事件留到下一轮重新拉取，避免内存无界增长。
+_PENDING_LIMIT = 1000
 
 
 @dataclass
@@ -130,10 +131,9 @@ class BilibiliCommentMonitor:
         *,
         enabled: bool = False,
         poll_interval_seconds: float = 1800.0,
-        max_replies_per_poll: int = 3,
+        max_replies_per_poll: int = 50,
         reply_cooldown_seconds: float = 60.0,
         feed_limit: int = 20,
-        start_time: int | None = None,
         max_seen: int = 2000,
     ) -> None:
         # client 既可以是 BilibiliClient，也可以是 BilibiliService（每轮重新解析，
@@ -145,8 +145,9 @@ class BilibiliCommentMonitor:
         self._max_per_poll = max(1, int(max_replies_per_poll or 1))
         self._cooldown = max(0.0, float(reply_cooldown_seconds or 0.0))
         self._feed_limit = max(1, int(feed_limit or 20))
-        self._start_time = int(start_time if start_time is not None else time.time())
         self._processed = RecentIds(max_seen)
+        #: 本轮没轮到的待回复事件，按 dedupe_key 去重，下一轮优先处理。
+        self._pending: dict[str, CommentEvent] = {}
         self._last_reply_at: dict[str, float] = {}
         self._failures = 0
         self._next_poll_at = 0.0
@@ -165,7 +166,9 @@ class BilibiliCommentMonitor:
             "poll_interval_seconds": float(
                 getattr(cfg, "poll_interval_seconds", 1800) or 1800
             ),
-            "max_replies_per_poll": int(getattr(cfg, "max_replies_per_poll", 3) or 3),
+            "max_replies_per_poll": int(
+                getattr(cfg, "max_replies_per_poll", 50) or 50
+            ),
             "reply_cooldown_seconds": float(
                 getattr(cfg, "reply_cooldown_seconds", 60.0) or 0.0
             ),
@@ -220,6 +223,7 @@ class BilibiliCommentMonitor:
             "failures": self._failures,
             "next_poll_interval_seconds": self.next_poll_interval,
             "last_error": self._last_error,
+            "pending": len(self._pending),
         }
 
     # ── 轮询 ──
@@ -257,23 +261,32 @@ class BilibiliCommentMonitor:
             logger.warning("B站评论通知获取失败", error=self._last_error)
             return 0
 
-        if not events:
+        # 先并入池（池中的旧事件排在新事件前面），再按上限逐条处理。
+        self._enqueue(events)
+        if not self._pending:
             self._failures = 0
             return 0
 
         replied = 0
+        attempts = 0
         my_uid = int(getattr(client, "my_uid", 0) or 0)
-        for event in events:
-            if replied >= self._max_per_poll:
+        for key in list(self._pending):
+            if replied >= self._max_per_poll or attempts >= self._max_per_poll:
+                # 剩余事件留在池里，下一轮继续。
+                logger.info(
+                    "B站评论本轮达到上限，剩余事件留待下轮",
+                    pending=len(self._pending),
+                )
                 break
+            event = self._pending.pop(key)
             if my_uid and event.user_uid == my_uid:
-                continue
-            if self._is_stale(event):
                 continue
             if event.dedupe_key in self._processed:
                 continue
             if not self._cooldown_ok(event):
+                self._pending[key] = event
                 continue
+            attempts += 1
             try:
                 sent = await self._reply(event, client)
             except asyncio.CancelledError:
@@ -282,9 +295,13 @@ class BilibiliCommentMonitor:
                 self._failures += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"
                 logger.exception("B站评论回复异常", oid=event.oid, rpid=event.parent_id)
+                self._pending[key] = event
                 continue
             if sent:
                 replied += 1
+            elif event.dedupe_key not in self._processed:
+                # 发送失败/暂时不满足条件：回池，下一轮重试。
+                self._pending[key] = event
         if replied:
             self._failures = 0
         return replied
@@ -309,10 +326,24 @@ class BilibiliCommentMonitor:
             unique.append(event)
         return unique
 
-    def _is_stale(self, event: CommentEvent) -> bool:
-        if not event.ctime:
-            return False
-        return event.ctime < self._start_time - _STARTUP_GRACE_SECONDS
+    def _enqueue(self, events: list[CommentEvent]) -> None:
+        """合并本轮新事件；池满时新事件跳过，下一轮会重新拉到。"""
+        dropped = 0
+        for event in events:
+            key = event.dedupe_key
+            if key in self._pending or key in self._processed:
+                continue
+            if len(self._pending) >= _PENDING_LIMIT:
+                # shortcut: 池满丢新事件，下一轮靠 feed 重新拉到；长期积压需换持久化队列。
+                dropped += 1
+                continue
+            self._pending[key] = event
+        if dropped:
+            logger.warning(
+                "B站评论待回复池已满，新事件留待下轮",
+                limit=_PENDING_LIMIT,
+                dropped=dropped,
+            )
 
     def _cooldown_ok(self, event: CommentEvent) -> bool:
         if self._cooldown <= 0:

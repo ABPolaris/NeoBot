@@ -34,6 +34,13 @@ _QUOTES = " \t\r\n\"“”'‘’「」『』"
 _SENTENCE_END = "。！？!?.；;，, "
 #: 注入提示词的档案内容上限（字符）。
 _PROFILE_MEMORY_CHARS = 800
+#: 视频增强：只认一条视频，摘要上限 1500 字，取不到就跳过、不阻断回复。
+_VIDEO_BV_RE = re.compile(r"BV[0-9A-Za-z]{10}")
+_VIDEO_URL_RE = re.compile(
+    r"(?:https?://)?(?:www\.|m\.)?bilibili\.com/video/[A-Za-z0-9]+", re.IGNORECASE
+)
+_VIDEO_CONTEXT_CHARS = 3000
+_VIDEO_ENRICH_TIMEOUT_SECONDS = 15.0
 
 
 def clean_reply(text: Any, max_chars: int = 0) -> str:
@@ -69,6 +76,7 @@ class BilibiliReplyEngine:
         *,
         archive_service: Any = None,
         uow_factory: Any = None,
+        video_service: Any = None,
         bot_name: str = "",
         bot_uid: int = 0,
         bot_data: str = "",
@@ -81,6 +89,7 @@ class BilibiliReplyEngine:
         self._provider = provider
         self._archive = archive_service
         self._uow_factory = uow_factory
+        self._video_service = video_service
         self._bot_name = bot_name
         self._bot_uid = int(bot_uid or 0)
         self._bot_data = bot_data
@@ -194,8 +203,16 @@ class BilibiliReplyEngine:
             if profile is not None:
                 profiles.append(profile)
         ctx.commenter_profiles = profiles
+        if not ctx.video_context:
+            ctx.video_context = await self._load_video_context(
+                [node.content for node in nodes]
+            )
 
     async def _enrich_private(self, ctx: PrivateMessageContext) -> None:
+        if not ctx.video_context:
+            ctx.video_context = await self._load_video_context(
+                [ctx.current_message, *(str(msg.get("content", "")) for msg in ctx.history)]
+            )
         profile = await self._load_profile(ctx.sender_uid, ctx.sender_name)
         if profile is None:
             return
@@ -206,6 +223,47 @@ class BilibiliReplyEngine:
         ]
         joined = "；".join(m for m in memories if m)
         ctx.memory_list = ctx.memory_list or joined
+
+    async def _load_video_context(self, texts: list[str]) -> str:
+        """正文/评论树里最多找一条BV号或视频链接，取标题+来源+摘要；失败留空。"""
+        if self._video_service is None:
+            return ""
+        identifier = _find_video_identifier(texts)
+        if not identifier:
+            return ""
+        try:
+            result = await asyncio.wait_for(
+                call_client(
+                    self._video_service.watch,
+                    identifier,
+                    max_chars=_VIDEO_CONTEXT_CHARS,
+                    include_comments=0,
+                ),
+                timeout=_VIDEO_ENRICH_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("B站视频上下文获取失败", identifier=identifier, error=str(exc))
+            return ""
+        if not isinstance(result, dict) or not bool(get_field(result, "ok", True)):
+            return ""
+        title = str(get_field(result, "title", "") or "").strip()
+        source = str(get_field(result, "source", "") or "").strip()
+        transcript = str(get_field(result, "transcript", "") or "").strip()
+        if not (title or transcript):
+            return ""
+        lines = []
+        if title:
+            lines.append(f"标题：{title}")
+        if source:
+            lines.append(f"来源：{source}")
+        if transcript:
+            lines.append(f"摘要：{transcript[:_VIDEO_CONTEXT_CHARS]}")
+        url = str(get_field(result, "url", "") or "").strip()
+        if url:
+            lines.append(f"链接：{url}")
+        return "\n".join(lines)
 
     async def _load_profile(self, uid: int, uname: str) -> dict | None:
         """读 B站记忆 + 账号关联到的 QQ 档案，合成一份评论者档案。"""
@@ -275,6 +333,18 @@ class BilibiliReplyEngine:
         except Exception as exc:
             logger.debug("读取QQ用户资料失败", qq_number=qq_number, error=str(exc))
             return None
+
+
+def _find_video_identifier(texts: list[str]) -> str:
+    for text in texts:
+        match = _VIDEO_BV_RE.search(text or "")
+        if match:
+            return match.group(0)
+    for text in texts:
+        match = _VIDEO_URL_RE.search(text or "")
+        if match:
+            return match.group(0)
+    return ""
 
 
 def _iter_nodes(nodes: list[CommentNode]) -> list[CommentNode]:
