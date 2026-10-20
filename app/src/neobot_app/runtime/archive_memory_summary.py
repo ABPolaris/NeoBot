@@ -1034,6 +1034,63 @@ class ArchiveMemoryAutoSummaryService:
             )
         return ok
 
+    async def _direct_rewrite_without_tools(
+        self, table_name: str, key: str, value: str, limit: int
+    ) -> bool:
+        """工具循环没写成功/没压到目标时，直接让模型输出压缩文本并写回。"""
+        if self._provider is None or len(value) > MAX_OVERFLOW_PROMPT_CHARS:
+            return False
+        from neobot_app.runtime.compact import compact_archive_record
+
+        candidate = await compact_archive_record(
+            self._provider,
+            value,
+            target_chars=limit,
+            table_name=table_name,
+            key=key,
+            timeout=self._next_call_timeout(max(1.0, self._summary_budget_seconds)),
+        )
+        if candidate is None:
+            self._logger.warning(
+                "档案压缩兜底直写未产生有效候选",
+                table_name=table_name,
+                key=key,
+                chars_before=len(value),
+                target_chars=limit,
+            )
+            return False
+        current = await self._archive.get(table_name, key)
+        if current is None:
+            return False
+        setter = getattr(self._archive, "set_if_version", None)
+        if not callable(setter):
+            return False
+        try:
+            await setter(
+                table_name,
+                key,
+                candidate,
+                list(getattr(current, "tags", None) or []),
+                int(getattr(current, "version", 0) or 0),
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "档案压缩兜底直写落库失败",
+                table_name=table_name,
+                key=key,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return False
+        self._logger.info(
+            "档案压缩兜底直写成功",
+            table_name=table_name,
+            key=key,
+            chars_before=len(value),
+            chars_after=len(candidate),
+            target_chars=limit,
+        )
+        return True
+
     async def compress_archive(
         self,
         table_name: str,
@@ -1111,7 +1168,15 @@ class ArchiveMemoryAutoSummaryService:
         if state is not None:
             state["chars_after"] = remaining
         task_key = self._overflow_task_key(table_name, key)
-        if tool_successes <= 0 or remaining > limit:
+        if remaining > limit:
+            # 工具循环可能只读不写、或 save 被判定失败：给一次不依赖工具的直写兜底。
+            if await self._direct_rewrite_without_tools(table_name, key, value, limit):
+                after = await self._archive.get(table_name, key)
+                remaining = len((after.value if after is not None else "") or "")
+                if state is not None:
+                    state["chars_after"] = remaining
+                tool_successes = max(tool_successes, 1)
+        if remaining > limit:
             failures = self._record_overflow_failure(task_key)
             # 压缩没成功 → 清掉服务侧冷却，让「下次写入再试」不被 600 秒冷却掩盖；
             # 真正的重试节奏由这里的失败退避控制。
@@ -2167,9 +2232,15 @@ def _trim_tool_history(chat_messages: list[dict]) -> None:
 
 
 def _is_tool_failure(result: Any) -> bool:
-    """判断工具结果是否属于失败（未知工具/执行异常），用于中止重试风暴。"""
+    """判断工具结果是否属于失败（未知工具/执行异常/JSON ok=false）。"""
     text = str(result or "")
-    return any(marker in text for marker in _TOOL_FAILURE_MARKERS)
+    if any(marker in text for marker in _TOOL_FAILURE_MARKERS):
+        return True
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("ok") is False
 
 
 def _normalize_message_text(text: str) -> str:
