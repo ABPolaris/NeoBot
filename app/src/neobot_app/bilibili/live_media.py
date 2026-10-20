@@ -314,6 +314,78 @@ class LiveMediaService:
         result["ok"] = True
         return result
 
+    # ── 录制一小段 ──
+
+    async def record_clip(self, room_id: int, *, seconds: int = 30) -> dict[str, Any]:
+        """把直播流原样录一小段（默认 30 秒）到本地 FLV；仅用于回看/留证。"""
+        rid = _to_int(room_id)
+        duration = max(5, min(_to_int(seconds) or 30, 300))
+        result: dict[str, Any] = {
+            "ok": False,
+            "path": "",
+            "room_id": rid,
+            "seconds": duration,
+            "bytes": 0,
+            "error": "",
+        }
+        if rid <= 0:
+            result["error"] = "房间号无效"
+            return result
+        ffmpeg = await self._resolve_ffmpeg()
+        if ffmpeg is None:
+            result["error"] = "未找到 ffmpeg（自动安装也失败，请安装后加入 PATH）"
+            return result
+        stream = await self.get_play_url(rid)
+        if not stream.get("ok"):
+            result["error"] = str(stream.get("error") or "获取直播拉流地址失败")
+            return result
+        url = str(stream.get("url") or "")
+        clip_dir = self._data_dir / "live_clips" if self._data_dir is not None else None
+        if clip_dir is None:
+            from neobot_app.core import DATA_DIR as _D
+
+            clip_dir = _D / "live_clips"
+        target = clip_dir / f"{rid}_{datetime.now():%Y%m%d_%H%M%S}.flv"
+        try:
+            clip_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            result["error"] = f"创建录制目录失败（{type(exc).__name__}）"
+            return result
+        command = [
+            str(ffmpeg), "-y", "-loglevel", "error",
+            "-rw_timeout", "15000000",
+            "-user_agent", DEFAULT_USER_AGENT,
+            "-headers", _LIVE_HEADERS,
+            "-i", url,
+            "-t", str(duration),
+            "-c", "copy",
+            str(target),
+        ]
+        try:
+            completed = await asyncio.to_thread(
+                subprocess.run, command, capture_output=True,
+                timeout=duration + _TRANSCODE_GRACE_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            _discard(target)
+            result["error"] = f"直播录制超时（{duration + _TRANSCODE_GRACE_SECONDS} 秒）"
+            return result
+        except OSError as exc:
+            _discard(target)
+            result["error"] = f"无法启动 ffmpeg（{type(exc).__name__}）"
+            return result
+        if completed.returncode != 0 or not _file_ready(target):
+            _discard(target)
+            result["error"] = f"直播录制失败（{_stderr_tail(completed)}）"
+            return result
+        try:
+            result["bytes"] = target.stat().st_size
+        except OSError:
+            result["bytes"] = 0
+        result.update({"ok": True, "path": str(target)})
+        self._logger.debug(f"B站直播录制完成: room={rid} path={target}")
+        return result
+
     # ── 内部 ──
 
     def _resolve_client(self) -> Any | None:

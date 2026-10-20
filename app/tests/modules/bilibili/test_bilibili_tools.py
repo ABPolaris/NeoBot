@@ -21,6 +21,8 @@ class FakeClient:
         self.info_calls: list[str] = []
         self.comment_calls: list[tuple] = []
         self.video_calls: list[int] = []
+        self.comment_cursor = ""
+        self.comment_is_end = True
 
     async def search(self, keyword, *, search_type="video", page=1):
         # 与真实 BilibiliClient 一致：当前不支持 order。
@@ -80,18 +82,25 @@ class FakeClient:
             "url": _VIDEO_URL,
         }
 
-    async def get_video_comments(self, oid, page=1, order="hot"):
-        self.comment_calls.append((oid, page, order))
-        return [
-            {
-                "rpid": 9,
-                "member": {"uname": "甲", "mid": 2},
-                "content": {"message": "好看"},
-                "like": 3,
-                "ctime": 1_700_000_000,
-                "rcount": 2,
-            }
-        ]
+    async def get_comments(
+        self, oid, comment_type=1, *, mode="hot", cursor=None, page_size=20
+    ):
+        self.comment_calls.append((oid, comment_type, mode, cursor, page_size))
+        return {
+            "items": [
+                {
+                    "rpid": 9,
+                    "member": {"uname": "甲", "mid": 2},
+                    "content": {"message": "好看"},
+                    "like": 3,
+                    "ctime": 1_700_000_000,
+                    "rcount": 2,
+                }
+            ],
+            "cursor": self.comment_cursor,
+            "is_end": self.comment_is_end,
+            "raw": {},
+        }
 
     async def get_space_info(self, mid):
         self.video_calls.append(int(mid))
@@ -110,6 +119,16 @@ class FakeClient:
                 {"bvid": "BV1xx411c7mD", "title": "投稿", "author": "UP主", "play": 5}
             ]
         }
+
+
+class LegacyCommentsClient(FakeClient):
+    """旧客户端：评论只有列表形式的 get_video_comments。"""
+
+    get_comments = None
+
+    async def get_video_comments(self, oid, page=1, order="hot"):
+        self.comment_calls.append((oid, page, order))
+        return [{"rpid": 9, "member": {"uname": "甲", "mid": 2}, "content": {"message": "好看"}}]
 
 
 class OrderedSearchClient(FakeClient):
@@ -335,10 +354,12 @@ async def test_video_comments_resolves_bv_to_aid() -> None:
 
     assert result["ok"] is True
     assert result["oid"] == 170001
+    assert result["comment_type"] == "video"
+    assert result["cursor"] == "" and result["is_end"] is True
     assert result["count"] == 1
     assert result["comments"][0]["uname"] == "甲"
     assert result["comments"][0]["content"] == "好看"
-    assert client.comment_calls == [(170001, 1, "hot")]
+    assert client.comment_calls == [(170001, 1, "hot", "", 20)]
 
 
 async def test_video_comments_accepts_av_number_without_extra_lookup() -> None:
@@ -351,7 +372,61 @@ async def test_video_comments_accepts_av_number_without_extra_lookup() -> None:
 
     assert result["oid"] == 170001
     assert client.info_calls == []
-    assert client.comment_calls == [(170001, 1, "time")]
+    assert client.comment_calls == [(170001, 1, "time", "", 20)]
+
+
+async def test_video_comments_passes_comment_type_limit_and_cursor() -> None:
+    client = FakeClient()
+    client.comment_cursor = "next-page"
+    client.comment_is_end = False
+    skill = BilibiliVideoSkill(client=client)
+
+    result = json.loads(
+        await skill.execute(
+            "video_comments",
+            {
+                "identifier": "987654321",
+                "comment_type": "dynamic",
+                "order": "time",
+                "cursor": "c1",
+                "limit": 5,
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["oid"] == 987654321
+    assert result["comment_type"] == "dynamic"
+    assert result["cursor"] == "next-page"
+    assert result["is_end"] is False
+    assert result["count"] == 1
+    assert client.comment_calls == [(987654321, 17, "time", "c1", 5)]
+    assert client.info_calls == []
+
+
+async def test_video_comments_rejects_unknown_type_and_falls_back_for_legacy_client() -> None:
+    invalid = json.loads(
+        await BilibiliVideoSkill(client=FakeClient()).execute(
+            "video_comments", {"identifier": "av170001", "comment_type": "弹幕"}
+        )
+    )
+    assert invalid["ok"] is False and "comment_type" in invalid["error"]
+
+    legacy_client = LegacyCommentsClient()
+    legacy = BilibiliVideoSkill(client=legacy_client)
+    video = json.loads(
+        await legacy.execute("video_comments", {"identifier": "av170001"})
+    )
+    assert video["ok"] is True
+    assert video["cursor"] == "" and video["is_end"] is True
+    assert legacy_client.comment_calls == [(170001, 1, "hot")]
+
+    dynamic = json.loads(
+        await legacy.execute(
+            "video_comments", {"identifier": "123456", "comment_type": "dynamic"}
+        )
+    )
+    assert dynamic["ok"] is False and "get_comments" in dynamic["error"]
 
 
 # ── 用户 ──
@@ -491,6 +566,14 @@ class WriteClient(FakeClient):
         self.comment_calls: list[tuple] = []
         self.like_calls: list[str] = []
         self.like_comment_calls: list[tuple] = []
+        self.coin_calls: list[tuple] = []
+        self.share_calls: list[str] = []
+        self.favorite_calls: list[tuple] = []
+        self.folder_calls: list[bool] = []
+        self.folders: list[dict] = [
+            {"id": 101, "title": "默认收藏夹", "media_count": 3},
+            {"id": 202, "fid": 202, "title": "学习", "media_count": 1},
+        ]
 
     async def post_video_comment(self, identifier, text, *, root=0, parent=0):
         self.comment_calls.append((identifier, text, root, parent))
@@ -509,6 +592,30 @@ class WriteClient(FakeClient):
         if self.error is not None:
             raise self.error
         return self.result
+
+    async def coin_video(self, identifier, multiply=1):
+        self.coin_calls.append((identifier, multiply))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    async def share_video(self, identifier):
+        self.share_calls.append(identifier)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    async def favorite_video(self, identifier, folder_id):
+        self.favorite_calls.append((identifier, folder_id))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    async def get_favorite_folders(self):
+        self.folder_calls.append(True)
+        if self.error is not None:
+            raise self.error
+        return list(self.folders)
 
 
 def test_video_skill_exposes_write_tools_with_public_action_warning() -> None:
@@ -614,6 +721,105 @@ async def test_like_failure_missing_rpid_and_missing_capability() -> None:
     assert missing["ok"] is False and "like_video" in missing["error"]
     assert missing_comment["ok"] is False and "like_comment" in missing_comment["error"]
 
+def test_video_skill_exposes_interaction_tools_with_public_action_warning() -> None:
+    tools = {
+        tool["function"]["name"]: tool["function"]
+        for tool in BilibiliVideoSkill(client=FakeClient()).get_tools()
+    }
+
+    assert {"coin_video", "share_video", "favorite_video", "favorite_folders"} <= set(tools)
+    for name in ("coin_video", "share_video", "favorite_video"):
+        assert "确认用户意图后再调用" in tools[name]["description"]
+        assert "公开" in tools[name]["description"]
+    assert "folder_id" in tools["favorite_video"]["description"]
+    assert "只读" in tools["favorite_folders"]["description"]
+    multiply = tools["coin_video"]["parameters"]["properties"]["multiply"]
+    assert multiply["default"] == 1 and multiply["enum"] == [1, 2]
+
+
+async def test_coin_video_defaults_to_one_and_takes_two() -> None:
+    client = WriteClient()
+    skill = BilibiliVideoSkill(client=client)
+
+    one = json.loads(await skill.execute("coin_video", {"identifier": _VIDEO_URL}))
+    two = json.loads(
+        await skill.execute("coin_video", {"identifier": "av170001", "multiply": "2"})
+    )
+
+    assert one["ok"] is True
+    assert one["multiply"] == 1 and one["coined"] is True
+    assert two["ok"] is True and two["multiply"] == 2
+    assert client.coin_calls == [("BV1xx411c7mD", 1), ("av170001", 2)]
+
+
+async def test_share_and_favorite_video_call_client() -> None:
+    client = WriteClient()
+    skill = BilibiliVideoSkill(client=client)
+
+    shared = json.loads(await skill.execute("share_video", {"identifier": _VIDEO_URL}))
+    favorited = json.loads(
+        await skill.execute(
+            "favorite_video", {"identifier": "av170001", "folder_id": "101"}
+        )
+    )
+
+    assert shared["ok"] is True and shared["shared"] is True
+    assert client.share_calls == ["BV1xx411c7mD"]
+    assert favorited["ok"] is True
+    assert favorited["folder_id"] == 101 and favorited["favorited"] is True
+    assert client.favorite_calls == [("av170001", 101)]
+
+
+async def test_favorite_folders_lists_ids_and_degrades() -> None:
+    client = WriteClient()
+    skill = BilibiliVideoSkill(client=client)
+
+    listed = json.loads(await skill.execute("favorite_folders", {}))
+    assert listed["ok"] is True and listed["count"] == 2
+    assert listed["folders"][0] == {"id": 101, "title": "默认收藏夹", "count": 3}
+    assert "只读" in listed["note"]
+    assert client.folder_calls == [True]
+
+    client.folders = []
+    empty = json.loads(await skill.execute("favorite_folders", {}))
+    assert empty["ok"] is True and empty["folders"] == []
+    assert "没有读到收藏夹" in empty["note"]
+
+
+async def test_interaction_tools_fail_and_require_capability() -> None:
+    failing = BilibiliVideoSkill(client=WriteClient(result=False))
+    coin = json.loads(await failing.execute("coin_video", {"identifier": "av170001"}))
+    share = json.loads(await failing.execute("share_video", {"identifier": "av170001"}))
+    favorite = json.loads(
+        await failing.execute("favorite_video", {"identifier": "av170001", "folder_id": 1})
+    )
+    assert coin["ok"] is False and "风控" in coin["error"]
+    assert share["ok"] is False and "风控" in share["error"]
+    assert favorite["ok"] is False and "风控" in favorite["error"]
+
+    bad_folder = json.loads(
+        await failing.execute("favorite_video", {"identifier": "av170001", "folder_id": 0})
+    )
+    assert bad_folder["ok"] is False and "folder_id" in bad_folder["error"]
+
+    broken = BilibiliVideoSkill(client=WriteClient(error=RuntimeError("接口炸了")))
+    raised = json.loads(await broken.execute("coin_video", {"identifier": "av170001"}))
+    assert raised["ok"] is False and "接口炸了" in raised["error"]
+    broken_folders = json.loads(await broken.execute("favorite_folders", {}))
+    assert broken_folders["ok"] is False and "接口炸了" in broken_folders["error"]
+
+    legacy = BilibiliVideoSkill(client=FakeClient())
+    cases = {
+        "coin_video": {"identifier": "av170001"},
+        "share_video": {"identifier": "av170001"},
+        "favorite_video": {"identifier": "av170001", "folder_id": 1},
+        "favorite_folders": {},
+    }
+    for name, args in cases.items():
+        missing = json.loads(await legacy.execute(name, args))
+        assert missing["ok"] is False and name in missing["error"]
+
+
 # ── 评论区树 / 消息通知（只读）──
 
 
@@ -683,22 +889,35 @@ class TreeClient(FakeClient):
         replies_of: dict[int, list] | None = None,
         reply_feed: list | None = None,
         at_feed: list | None = None,
+        cursor: str = "",
+        is_end: bool = True,
     ) -> None:
         super().__init__()
         self.roots = list(roots or [])
         self.replies_of = dict(replies_of or {})
         self.reply_feed = list(reply_feed or [])
         self.at_feed = list(at_feed or [])
-        self.reply_calls: list[tuple[int, int]] = []
+        self.reply_calls: list[tuple[int, int, int]] = []
         self.feed_calls: list[int] = []
         self.at_calls: list[int] = []
+        self.comment_cursor = cursor
+        self.comment_is_end = is_end
 
-    async def get_video_comments(self, oid, page=1, order="hot"):
-        self.comment_calls.append((oid, page, order))
-        return self.roots
+    async def get_comments(
+        self, oid, comment_type=1, *, mode="hot", cursor=None, page_size=20
+    ):
+        self.comment_calls.append((oid, comment_type, mode, cursor, page_size))
+        return {
+            "items": self.roots,
+            "cursor": self.comment_cursor,
+            "is_end": self.comment_is_end,
+            "raw": {},
+        }
 
-    async def get_comment_replies(self, oid, root, *, page=1, page_size=20):
-        self.reply_calls.append((oid, root))
+    async def get_comment_replies(
+        self, oid, root, *, page=1, page_size=20, type_=1
+    ):
+        self.reply_calls.append((oid, root, type_))
         return self.replies_of.get(root, [])
 
     async def get_reply_feed(self, limit=20):
@@ -731,7 +950,8 @@ async def test_comment_tree_uses_inline_replies() -> None:
     assert node["replies"][0]["content"] == "同意"
     # 自带楼中楼时不再额外请求。
     assert client.reply_calls == []
-    assert client.comment_calls == [(170001, 1, "hot")]
+    assert client.comment_calls == [(170001, 1, "hot", "", 5)]
+    assert result["cursor"] == "" and result["is_end"] is True
 
 
 async def test_comment_tree_fetches_missing_replies() -> None:
@@ -752,7 +972,7 @@ async def test_comment_tree_fetches_missing_replies() -> None:
     first, second = result["comments"]
     assert [item["rpid"] for item in first["replies"]] == [10, 11]
     assert second["replies"] == [] and second["reply_count"] == 0
-    assert client.reply_calls == [(170001, 9)]  # 只有带楼中楼的那条才补拉
+    assert client.reply_calls == [(170001, 9, 1)]  # 只有带楼中楼的那条才补拉
 
 
 async def test_comment_tree_expands_one_root() -> None:
@@ -769,7 +989,51 @@ async def test_comment_tree_expands_one_root() -> None:
     assert result["root_rpid"] == 9
     assert [item["rpid"] for item in result["comments"]] == [10]
     assert client.comment_calls == []
-    assert client.reply_calls == [(170001, 9)]
+    assert client.reply_calls == [(170001, 9, 1)]
+    assert result["cursor"] == ""
+
+
+async def test_comment_tree_supports_dynamic_and_returns_cursor() -> None:
+    client = TreeClient(
+        roots=[_root(9, reply_count=1)],
+        replies_of={9: [_reply(10)]},
+        cursor="next-root",
+        is_end=False,
+    )
+    skill = BilibiliVideoSkill(client=client)
+
+    result = json.loads(
+        await skill.execute(
+            "comment_tree",
+            {
+                "identifier": "https://t.bilibili.com/987654321",
+                "comment_type": "dynamic",
+                "limit": 5,
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["oid"] == 987654321
+    assert result["comment_type"] == "dynamic"
+    assert result["cursor"] == "next-root"
+    assert result["is_end"] is False
+    assert client.comment_calls == [(987654321, 17, "hot", "", 5)]
+    assert client.reply_calls == [(987654321, 9, 17)]
+
+
+def test_comment_tools_document_types_and_pagination() -> None:
+    tools = {
+        tool["function"]["name"]: tool["function"]
+        for tool in BilibiliVideoSkill(client=FakeClient()).get_tools()
+    }
+    expected = ["video", "dynamic", "article", "opus", "bangumi"]
+    for name in ("video_comments", "comment_tree"):
+        params = tools[name]["parameters"]["properties"]
+        assert params["comment_type"]["enum"] == expected
+        assert "limit" in params and "cursor" in params
+        assert "不自动回复" in tools[name]["description"]
+    assert "翻页" in tools["video_comments"]["description"]
 
 
 async def test_comment_tree_requires_video_id_and_reply_capability() -> None:

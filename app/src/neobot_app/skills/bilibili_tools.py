@@ -2,9 +2,10 @@
 
 按 duck typing 调用并行实现的接口，不 import client/video 模块：
 - BilibiliService.client 提供 search / get_video_info / get_space_info /
-  get_user_videos / get_video_comments / get_comment_replies；
+  get_user_videos / get_comments / get_work_comments / get_video_comments / get_comment_replies；
 - 消息通知 get_reply_feed / get_at_feed（只读；复用 comment_monitor.parse_feed_item 归一化）；
-- 写操作 post_video_comment / like_video / like_comment（缺失时返回明确错误）；
+- 写操作 post_video_comment / like_video / like_comment / coin_video / share_video /
+  favorite_video 与只读的 favorite_folders（客户端缺能力时返回明确错误）；
 - BilibiliVideoService.watch 提供视频页面信息 + 字幕/ASR 转写。
 
 所有失败都返回 {"ok": false, "error": "中文说明"}，不把异常栈丢给模型。
@@ -34,6 +35,14 @@ _SPACE_RE = re.compile(r"\s+")
 
 _VIDEO_ORDERS = ("totalrank", "click", "pubdate", "dm", "stow")
 _COMMENT_ORDERS = ("hot", "time")
+#: comment_type 名称 -> B站评论区类型码（视频 1、动态 17、专栏/opus 12、番剧 11）。
+_COMMENT_TYPE_ALIASES = {
+    "video": 1,
+    "dynamic": 17,
+    "article": 12,
+    "opus": 12,
+    "bangumi": 11,
+}
 _PROFILE_CHARS = 1500
 #: comment_tree 一轮最多补拉的楼中楼根评论数（避免大 limit 时串行请求过多）。
 _TREE_FETCH_BUDGET = 10
@@ -179,6 +188,14 @@ def _comment_node(raw: Any) -> dict[str, Any]:
     return node
 
 
+def _favorite_folder_item(raw: Any) -> dict[str, Any]:
+    return {
+        "id": _to_int(get_field(raw, "id", get_field(raw, "fid", 0))),
+        "title": _text(get_field(raw, "title", "")),
+        "count": _to_int(get_field(raw, "media_count", 0)),
+    }
+
+
 def _content_url(business_id: int, oid: int) -> str:
     """通知没有 uri 时按内容类型拼一个可点链接。"""
     if oid <= 0:
@@ -289,6 +306,35 @@ def _aid_from_text(text: str) -> int:
     if match:
         return _to_int(match.group(1))
     return _to_int(text) if text.isdigit() else 0
+
+
+def _comment_type(raw: Any) -> tuple[int, str]:
+    """comment_type 名称/类型码 -> (类型码, 输出名)；不认识返回 (0, "")。"""
+    text = str(raw or "").strip().lower() or "video"
+    if text.isdigit():
+        code = _to_int(text)
+        return (code, text) if 1 <= code <= 33 else (0, "")
+    code = _COMMENT_TYPE_ALIASES.get(text, 0)
+    return code, (text if code else "")
+
+
+def _comment_oid_from_text(text: str) -> int:
+    """动态/专栏/opus 的 oid 就是标识里的数字（纯数字或链接都行）。"""
+    oid = _aid_from_text(text)
+    if oid:
+        return oid
+    match = re.search(r"(\d+)", text)
+    return _to_int(match.group(1)) if match else 0
+
+
+def _comment_type_schema() -> dict[str, Any]:
+    return {
+        "type": "string",
+        "description": "评论区类型：video=视频（默认），dynamic=动态，article=专栏，"
+        "opus=图文，bangumi=番剧",
+        "enum": list(_COMMENT_TYPE_ALIASES),
+        "default": "video",
+    }
 
 
 class _Unavailable(RuntimeError):
@@ -438,7 +484,7 @@ class BilibiliVideoSkill(_BilibiliToolBase):
     def description(self) -> str:
         return (
             "B站视频：查资料、看视频（字幕/语音转写）、拉评论/评论树、"
-            "读消息通知、发评论与点赞"
+            "读消息通知、发评论、点赞、投币、分享与收藏"
         )
 
     @property
@@ -449,20 +495,25 @@ class BilibiliVideoSkill(_BilibiliToolBase):
             "  watch_video — 看视频：拉取B站页面字幕或语音识别转写，默认最多返回 3000 字符；"
             "超过 3000 字符的完整转写会自动存档，可用 read_video_transcript 按需读取。\n"
             "  read_video_transcript — 读取之前 watch_video 存档的完整转写（按 BV 号）。\n"
-            "  video_comments — 拉视频评论，order=hot（默认，热门）或 time（最新）；"
-            "要看楼中楼用 comment_tree。\n"
-            "  comment_tree — 拉评论区树：顶级评论 + 楼中楼；root_rpid 非 0 时只展开这条"
-            "评论下的回复。只读，不自动回复；看完可用 comment_video 回复、"
-            "comment_tree 继续展开。\n"
+            "  video_comments — 拉评论区列表（只读，不自动回复）：comment_type=video（视频，"
+            "默认）/dynamic（动态）/article（专栏）/opus（图文）/bangumi（番剧）；"
+            "order=hot（默认，热门）或 time（最新）；cursor 传上一页返回的 cursor 翻页。\n"
+            "  comment_tree — 拉评论区树：顶级评论 + 楼中楼（comment_type 同上）；"
+            "root_rpid 非 0 时只展开这条评论下的回复；返回 cursor 可继续翻页。"
+            "只读，不自动回复；看完可用 comment_video 回复。\n"
             "  read_bili_messages — 读「回复我的」+「@我的」通知（标题、链接、评论、用户）。"
             "只读，不自动回复；看完可用 comment_video / comment_tree 继续。\n"
             "  comment_video — 给视频发评论；root/parent 非 0 时回复指定楼中楼。\n"
             "  like_video — 点赞视频。\n"
-            "  like_comment — 点赞视频下的一条评论（rpid 为评论ID）。\n\n"
+            "  like_comment — 点赞视频下的一条评论（rpid 为评论ID）。\n"
+            "  coin_video — 给视频投币：multiply=1（默认）投一枚，2 投两枚。\n"
+            "  share_video — 把视频分享到动态。\n"
+            "  favorite_video — 把视频收藏到指定收藏夹，folder_id 用 favorite_folders 查。\n"
+            "  favorite_folders — 列出当前账号的收藏夹（只读，返回收藏夹ID/标题/视频数）。\n\n"
             "identifier 支持 BV号（如 BV1xx411c7mD）、av号（如 av170001）或完整视频链接。"
             "看视频比查资料慢，先确认是不是目标视频；不要反复看同一个视频。\n"
-            "写操作会以当前登录B站账号公开发言/点赞，确认用户意图后再调用；"
-            "失败通常是登录失效、已点赞或触发风控，不要反复重试。"
+            "写操作（评论/点赞/投币/分享/收藏）会以当前登录B站账号公开操作，"
+            "确认用户意图后再调用；失败通常是登录失效、已经操作过或触发风控，不要反复重试。"
         )
 
     def get_tools(self) -> list[dict]:
@@ -509,19 +560,30 @@ class BilibiliVideoSkill(_BilibiliToolBase):
             ),
             self._tool_def(
                 "video_comments",
-                "拉取B站视频的评论列表，可按热门或最新排序。",
+                "拉取B站评论区列表（视频/动态/专栏/图文/番剧），可按热门或最新排序，"
+                "用 cursor 翻页；只读，不自动回复。",
                 {
                     "properties": {
                         "identifier": {
                             "type": "string",
-                            "description": "BV号、av号或视频链接",
+                            "description": "BV号、av号、视频链接，或动态/专栏/opus 的 ID/链接",
                         },
-                        "page": {"type": "integer", "description": "页码，默认1", "default": 1},
+                        "comment_type": _comment_type_schema(),
                         "order": {
                             "type": "string",
                             "description": "排序：hot=热门（默认），time=最新",
                             "enum": list(_COMMENT_ORDERS),
                             "default": "hot",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "本页最多返回多少条评论，默认20，最大50",
+                            "default": 20,
+                        },
+                        "cursor": {
+                            "type": "string",
+                            "description": "翻页游标：传上一页返回的 cursor，空=第一页",
+                            "default": "",
                         },
                     },
                     "required": ["identifier"],
@@ -529,14 +591,16 @@ class BilibiliVideoSkill(_BilibiliToolBase):
             ),
             self._tool_def(
                 "comment_tree",
-                "拉取B站视频评论区树（顶级评论 + 楼中楼回复）。只读，不自动回复；"
-                "看完可用 comment_video 回复、comment_tree（root_rpid）继续展开某条楼中楼。",
+                "拉取B站评论区树（顶级评论 + 楼中楼回复），支持视频/动态/专栏/图文/番剧。"
+                "只读，不自动回复；看完可用 comment_video 回复、"
+                "comment_tree（root_rpid）继续展开某条楼中楼。",
                 {
                     "properties": {
                         "identifier": {
                             "type": "string",
-                            "description": "BV号、av号或视频链接",
+                            "description": "BV号、av号、视频链接，或动态/专栏/opus 的 ID/链接",
                         },
+                        "comment_type": _comment_type_schema(),
                         "root_rpid": {
                             "type": "integer",
                             "description": "根评论ID：0=拉顶级评论树；非0=只展开这条评论下的楼中楼",
@@ -546,6 +610,11 @@ class BilibiliVideoSkill(_BilibiliToolBase):
                             "type": "integer",
                             "description": "最多返回多少条评论/回复，默认20",
                             "default": 20,
+                        },
+                        "cursor": {
+                            "type": "string",
+                            "description": "翻页游标：传上一页返回的 cursor，空=第一页",
+                            "default": "",
                         },
                     },
                     "required": ["identifier"],
@@ -623,6 +692,53 @@ class BilibiliVideoSkill(_BilibiliToolBase):
                     },
                     "required": ["identifier", "rpid"],
                 },
+            ),
+            self._tool_def(
+                "coin_video",
+                "给B站视频投币（会以当前登录B站账号公开投币，确认用户意图后再调用）；"
+                "multiply=2 投两枚，默认投一枚。",
+                {
+                    "properties": {
+                        "identifier": {"type": "string", "description": "BV号、av号或视频链接"},
+                        "multiply": {
+                            "type": "integer",
+                            "description": "投币数量：1=投一枚（默认），2=投两枚",
+                            "enum": [1, 2],
+                            "default": 1,
+                        },
+                    },
+                    "required": ["identifier"],
+                },
+            ),
+            self._tool_def(
+                "share_video",
+                "把B站视频分享到动态（会以当前登录B站账号公开发布分享，确认用户意图后再调用）。",
+                {
+                    "properties": {
+                        "identifier": {"type": "string", "description": "BV号、av号或视频链接"},
+                    },
+                    "required": ["identifier"],
+                },
+            ),
+            self._tool_def(
+                "favorite_video",
+                "把B站视频收藏到指定收藏夹（会以当前登录B站账号公开收藏，确认用户意图后再调用）；"
+                "folder_id 必填，可先用 favorite_folders 查。",
+                {
+                    "properties": {
+                        "identifier": {"type": "string", "description": "BV号、av号或视频链接"},
+                        "folder_id": {
+                            "type": "integer",
+                            "description": "收藏夹ID（用 favorite_folders 查）",
+                        },
+                    },
+                    "required": ["identifier", "folder_id"],
+                },
+            ),
+            self._tool_def(
+                "favorite_folders",
+                "列出当前登录B站账号的收藏夹（只读，不会改动任何收藏），返回收藏夹ID、"
+                "标题与视频数；favorite_video 需要这里的 folder_id。",
             ),
         ]
         if self._archive is not None:
@@ -864,30 +980,74 @@ async def _resolve_oid(client: Any, identifier: str) -> int:
     return _video_detail(info)["aid"]
 
 
+async def _resolve_comment_oid(client: Any, identifier: str, comment_type: int) -> int:
+    """视频解析成 aid；动态/专栏/opus/番剧直接取标识里的数字。"""
+    if comment_type == 1:
+        return await _resolve_oid(client, identifier)
+    return _comment_oid_from_text(identifier)
+
+
+def _comment_type_error(raw: Any) -> str:
+    names = "/".join(_COMMENT_TYPE_ALIASES)
+    return f"comment_type 必须是 {names} 或 1-33 的类型码，收到 {raw!r}"
+
+
 async def _handle_video_comments(skill: _BilibiliToolBase, args: dict) -> str:
     identifier = _video_identifier(args.get("identifier"))
     if not identifier:
-        return _json({"ok": False, "error": "缺少 identifier（BV号、av号或视频链接）"})
+        return _json(
+            {"ok": False, "error": "缺少 identifier（BV号、av号或视频/动态/专栏的 ID/链接）"}
+        )
     order = str(args.get("order") or "hot").strip()
     if order not in _COMMENT_ORDERS:
         return _json(
             {"ok": False, "error": f"order 必须是 {'/'.join(_COMMENT_ORDERS)}，收到 {order!r}"}
         )
-    page = _page(args.get("page"))
-    client = skill._require_client("get_video_info", "get_video_comments")
-    oid = await _resolve_oid(client, identifier)
-    if not oid:
-        return _json({"ok": False, "error": f"无法从 {identifier} 解析出视频号"})
-    kwargs = _call_kwargs(client.get_video_comments, {"page": page, "order": order})
-    replies = await call_client(client.get_video_comments, oid, **kwargs)
-    items = [_comment_item(item) for item in replies or [] if item]
+    comment_type, type_name = _comment_type(args.get("comment_type"))
+    if not comment_type:
+        return _json({"ok": False, "error": _comment_type_error(args.get("comment_type"))})
+    limit = min(max(_to_int(args.get("limit")) or 20, 1), 50)
+    cursor = str(args.get("cursor") or "").strip()
+    client = skill._require_client()
+    get_comments = getattr(client, "get_comments", None)
+    if callable(get_comments):
+        oid = await _resolve_comment_oid(client, identifier, comment_type)
+        if not oid:
+            return _json({"ok": False, "error": f"无法从 {identifier} 解析出评论区 oid"})
+        page = await call_client(
+            get_comments,
+            oid,
+            comment_type,
+            mode=order,
+            cursor=cursor,
+            page_size=limit,
+        )
+        page = page if isinstance(page, dict) else {}
+        rows = page.get("items") or []
+        next_cursor = str(page.get("cursor") or "")
+        is_end = bool(page.get("is_end", True))
+    else:
+        # 旧客户端只有 get_video_comments（列表形式），仅支持视频评论区。
+        legacy = getattr(client, "get_video_comments", None)
+        if comment_type != 1 or not callable(legacy):
+            return _json(
+                {"ok": False, "error": "B站客户端缺少 get_comments 能力（客户端未更新或未配置）"}
+            )
+        oid = await _resolve_oid(client, identifier)
+        if not oid:
+            return _json({"ok": False, "error": f"无法从 {identifier} 解析出视频号"})
+        rows = await call_client(legacy, oid, order=order)
+        next_cursor, is_end = "", True
+    items = [_comment_item(item) for item in rows or [] if isinstance(item, dict)][:limit]
     return _json(
         {
             "ok": True,
             "oid": oid,
-            "page": page,
+            "comment_type": type_name,
             "order": order,
             "count": len(items),
+            "cursor": next_cursor,
+            "is_end": is_end,
             "comments": items,
         }
     )
@@ -896,18 +1056,25 @@ async def _handle_video_comments(skill: _BilibiliToolBase, args: dict) -> str:
 async def _handle_comment_tree(skill: _BilibiliToolBase, args: dict) -> str:
     identifier = _video_identifier(args.get("identifier"))
     if not identifier:
-        return _json({"ok": False, "error": "缺少 identifier（BV号、av号或视频链接）"})
+        return _json(
+            {"ok": False, "error": "缺少 identifier（BV号、av号或视频/动态/专栏的 ID/链接）"}
+        )
+    comment_type, type_name = _comment_type(args.get("comment_type"))
+    if not comment_type:
+        return _json({"ok": False, "error": _comment_type_error(args.get("comment_type"))})
     root_rpid = max(0, _to_int(args.get("root_rpid")))
     limit = min(max(_to_int(args.get("limit")) or 20, 1), 50)
-    client = skill._require_client(
-        "get_video_info", "get_video_comments", "get_comment_replies"
-    )
-    oid = await _resolve_oid(client, identifier)
+    cursor = str(args.get("cursor") or "").strip()
+    client = skill._require_client("get_video_info", "get_comment_replies")
+    oid = await _resolve_comment_oid(client, identifier, comment_type)
     if not oid:
-        return _json({"ok": False, "error": f"无法从 {identifier} 解析出视频号"})
+        return _json({"ok": False, "error": f"无法从 {identifier} 解析出评论区 oid"})
+    reply_kwargs = _call_kwargs(client.get_comment_replies, {"type_": comment_type})
 
     if root_rpid:
-        replies = await call_client(client.get_comment_replies, oid, root_rpid)
+        replies = await call_client(
+            client.get_comment_replies, oid, root_rpid, **reply_kwargs
+        )
         comments = [
             _comment_node(item) for item in replies or [] if isinstance(item, dict)
         ][:limit]
@@ -915,14 +1082,37 @@ async def _handle_comment_tree(skill: _BilibiliToolBase, args: dict) -> str:
             {
                 "ok": True,
                 "oid": oid,
+                "comment_type": type_name,
                 "root_rpid": root_rpid,
                 "count": len(comments),
+                "cursor": "",
+                "is_end": True,
                 "comments": comments,
             }
         )
 
-    kwargs = _call_kwargs(client.get_video_comments, {"page": 1, "order": "hot"})
-    roots = await call_client(client.get_video_comments, oid, **kwargs)
+    get_comments = getattr(client, "get_comments", None)
+    if callable(get_comments):
+        page = await call_client(
+            get_comments,
+            oid,
+            comment_type,
+            mode="hot",
+            cursor=cursor,
+            page_size=limit,
+        )
+        page = page if isinstance(page, dict) else {}
+        roots = page.get("items") or []
+        next_cursor = str(page.get("cursor") or "")
+        is_end = bool(page.get("is_end", True))
+    else:
+        if comment_type != 1:
+            return _json(
+                {"ok": False, "error": "B站客户端缺少 get_comments 能力（客户端未更新或未配置）"}
+            )
+        roots = await call_client(client.get_video_comments, oid, order="hot")
+        next_cursor, is_end = "", True
+
     comments: list[dict[str, Any]] = []
     fetches = 0
     for raw in roots or []:
@@ -940,12 +1130,23 @@ async def _handle_comment_tree(skill: _BilibiliToolBase, args: dict) -> str:
         # shortcut: 一轮最多补拉 _TREE_FETCH_BUDGET 条根评论的楼中楼；要看更多用 root_rpid 单独展开。
         if not children and node["reply_count"] > 0 and fetches < _TREE_FETCH_BUDGET:
             fetches += 1
-            fetched = await call_client(client.get_comment_replies, oid, node["rpid"])
+            fetched = await call_client(
+                client.get_comment_replies, oid, node["rpid"], **reply_kwargs
+            )
             children = [item for item in fetched or [] if isinstance(item, dict)]
         node["replies"] = [_comment_node(item) for item in children][:limit]
         comments.append(node)
     return _json(
-        {"ok": True, "oid": oid, "root_rpid": 0, "count": len(comments), "comments": comments}
+        {
+            "ok": True,
+            "oid": oid,
+            "comment_type": type_name,
+            "root_rpid": 0,
+            "count": len(comments),
+            "cursor": next_cursor,
+            "is_end": is_end,
+            "comments": comments,
+        }
     )
 
 
@@ -1112,6 +1313,116 @@ async def _handle_like_comment(skill: _BilibiliToolBase, args: dict) -> str:
     )
 
 
+async def _handle_coin_video(skill: _BilibiliToolBase, args: dict) -> str:
+    identifier = _video_identifier(args.get("identifier"))
+    if not identifier:
+        return _json({"ok": False, "error": "缺少 identifier（BV号、av号或视频链接）"})
+    multiply = 2 if _to_int(args.get("multiply")) >= 2 else 1
+    client = skill._require_client("coin_video")
+    try:
+        coined = await call_client(client.coin_video, identifier, multiply=multiply)
+    except Exception as exc:
+        logger.warning("B站视频投币失败", identifier=identifier, error=str(exc))
+        return _json(
+            {
+                "ok": False,
+                "identifier": identifier,
+                "error": f"投币失败：{exc}（可能登录失效或触发风控）",
+            }
+        )
+    if not coined:
+        return _json(
+            {
+                "ok": False,
+                "identifier": identifier,
+                "error": "投币失败：B站未返回成功，可能登录失效、硬币不足或触发风控",
+            }
+        )
+    return _json({"ok": True, "identifier": identifier, "multiply": multiply, "coined": True})
+
+
+async def _handle_share_video(skill: _BilibiliToolBase, args: dict) -> str:
+    identifier = _video_identifier(args.get("identifier"))
+    if not identifier:
+        return _json({"ok": False, "error": "缺少 identifier（BV号、av号或视频链接）"})
+    client = skill._require_client("share_video")
+    try:
+        shared = await call_client(client.share_video, identifier)
+    except Exception as exc:
+        logger.warning("B站视频分享失败", identifier=identifier, error=str(exc))
+        return _json(
+            {
+                "ok": False,
+                "identifier": identifier,
+                "error": f"分享失败：{exc}（可能登录失效或触发风控）",
+            }
+        )
+    if not shared:
+        return _json(
+            {
+                "ok": False,
+                "identifier": identifier,
+                "error": "分享失败：B站未返回成功，可能登录失效或触发风控",
+            }
+        )
+    return _json({"ok": True, "identifier": identifier, "shared": True})
+
+
+async def _handle_favorite_video(skill: _BilibiliToolBase, args: dict) -> str:
+    identifier = _video_identifier(args.get("identifier"))
+    if not identifier:
+        return _json({"ok": False, "error": "缺少 identifier（BV号、av号或视频链接）"})
+    folder_id = _to_int(args.get("folder_id"))
+    if folder_id <= 0:
+        return _json(
+            {"ok": False, "error": "缺少或无效的 folder_id（收藏夹ID，可先用 favorite_folders 查）"}
+        )
+    client = skill._require_client("favorite_video")
+    try:
+        favorited = await call_client(client.favorite_video, identifier, folder_id)
+    except Exception as exc:
+        logger.warning("B站视频收藏失败", identifier=identifier, error=str(exc))
+        return _json(
+            {
+                "ok": False,
+                "identifier": identifier,
+                "error": f"收藏失败：{exc}（可能登录失效或触发风控）",
+            }
+        )
+    if not favorited:
+        return _json(
+            {
+                "ok": False,
+                "identifier": identifier,
+                "error": "收藏失败：B站未返回成功，可能登录失效、收藏夹无效或触发风控",
+            }
+        )
+    return _json(
+        {"ok": True, "identifier": identifier, "folder_id": folder_id, "favorited": True}
+    )
+
+
+async def _handle_favorite_folders(skill: _BilibiliToolBase, args: dict) -> str:
+    client = skill._require_client("get_favorite_folders")
+    try:
+        raw_folders = await call_client(client.get_favorite_folders)
+    except Exception as exc:
+        logger.warning("B站收藏夹读取失败", error=str(exc))
+        return _json({"ok": False, "error": f"读取收藏夹失败：{exc}"})
+    folders = [
+        _favorite_folder_item(item) for item in raw_folders or [] if isinstance(item, dict)
+    ]
+    payload: dict[str, Any] = {
+        "ok": True,
+        "count": len(folders),
+        "folders": folders,
+        "note": "只读列表，不会改动收藏；favorite_video 的 folder_id 用这里的 id。",
+    }
+    if not folders:
+        payload["note"] = "没有读到收藏夹（可能未登录、没有收藏夹或接口失败）；只读，不会改动收藏。"
+    return _json(payload)
+
+
 async def _handle_user_info(skill: _BilibiliToolBase, args: dict) -> str:
     uid = _parse_uid(args.get("uid"))
     if not uid:
@@ -1244,6 +1555,10 @@ _HANDLERS = {
     "comment_video": _handle_comment_video,
     "like_video": _handle_like_video,
     "like_comment": _handle_like_comment,
+    "coin_video": _handle_coin_video,
+    "share_video": _handle_share_video,
+    "favorite_video": _handle_favorite_video,
+    "favorite_folders": _handle_favorite_folders,
     "user_info": _handle_user_info,
     "user_videos": _handle_user_videos,
     "linked_qq_profile": _handle_linked_qq_profile,

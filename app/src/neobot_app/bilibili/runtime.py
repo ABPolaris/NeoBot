@@ -16,12 +16,15 @@ from neobot_app.bilibili.comment_monitor import BilibiliCommentMonitor
 from neobot_app.core import DATA_DIR
 from neobot_app.bilibili.diary import BilibiliDiaryService, BilibiliDiarySkill
 from neobot_app.bilibili.live_interact import BilibiliLiveInteractor
+from neobot_app.bilibili.video_frames import VideoFrameService
 from neobot_app.bilibili.media import BilibiliVideoService
 from neobot_app.bilibili.private_monitor import BilibiliPrivateMonitor
 from neobot_app.bilibili.reply_engine import BilibiliReplyEngine
 from neobot_app.bilibili.service import BilibiliService
 from neobot_app.skills.bilibili_link import BilibiliLinkSkill
 from neobot_app.skills.bilibili_live import BilibiliLiveSkill
+from neobot_app.skills.bilibili_read import BilibiliReadSkill
+from neobot_app.skills.bilibili_video_frames import BilibiliVideoFramesSkill
 from neobot_app.skills.bilibili_memory import BilibiliMemorySkill
 from neobot_app.skills.bilibili_tools import (
     BilibiliSearchSkill,
@@ -49,6 +52,7 @@ class BilibiliRuntime:
         command_service: Any,
         asr_service: Any = None,
         vision_provider: Any = None,
+        on_live_event: Any = None,
         logger: Logger | None = None,
         bot_name: str = "",
         bot_data: str = "",
@@ -64,6 +68,12 @@ class BilibiliRuntime:
             asr_service=asr_service,
             archive_service=archive_service,
             logger=self._logger,
+        )
+        self.video_frames_service = VideoFrameService(
+            self.service,
+            vision_provider=vision_provider,
+            logger=self._logger,
+            data_dir=DATA_DIR,
         )
         self.engine = BilibiliReplyEngine(
             provider,
@@ -103,6 +113,7 @@ class BilibiliRuntime:
             at_only=bool(getattr(cfg, "live_interaction_at_only", True)),
             asr_service=asr_service,
             vision_provider=vision_provider,
+            on_event=on_live_event,
         )
         self.channel = BilibiliCrossChatChannel(
             self.service, self.engine, live_interactor=self.live_interactor
@@ -494,6 +505,10 @@ def build_bilibili_skills(
                 live_interactor=runtime.live_interactor,
                 service=runtime.service,
             ),
+            lambda: BilibiliVideoFramesSkill(
+                video_frames_service=runtime.video_frames_service,
+            ),
+            lambda: BilibiliReadSkill(service=runtime.service),
         ):
             try:
                 skills.append(factory())

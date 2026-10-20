@@ -1,4 +1,4 @@
-"""B站直播/点赞写操作：端点参数、csrf、BV 解析与失败降级。"""
+"""B站直播与视频互动写操作：端点参数、csrf、BV 解析与失败降级。"""
 
 from __future__ import annotations
 
@@ -20,6 +20,16 @@ _DANMU_INFO = {
         "host_list": [{"host": "broadcastlv.chat.bilibili.com", "wss_port": 443}],
     },
 }
+_NAV_WBI = {
+    "code": 0,
+    "data": {
+        "wbi_img": {
+            "img_url": "https://i0.hdslb.com/bfs/wbi/" + "a" * 32 + ".png",
+            "sub_url": "https://i0.hdslb.com/bfs/wbi/" + "b" * 32 + ".png",
+        }
+    },
+}
+
 _VIEW = {"code": 0, "data": {"aid": 170001, "bvid": "BV1xx411c7mD"}}
 
 
@@ -37,18 +47,21 @@ def test_get_live_room_info_returns_data() -> None:
 
 
 def test_get_live_danmu_info_uses_real_room_id() -> None:
-    session = FakeSession([FakeResponse(_ROOM_INFO), FakeResponse(_DANMU_INFO)])
+    session = FakeSession([FakeResponse(_ROOM_INFO), FakeResponse(_NAV_WBI), FakeResponse(_DANMU_INFO)])
     data = _client(session).get_live_danmu_info(5440)
     assert data["token"] == "live-token"
     call = session.calls[-1]
     assert call["url"].endswith("/xlive/web-room/v1/index/getDanmuInfo")
-    assert call["params"] == {"id": 21452505, "type": 0}
+    assert call["params"]["id"] == "21452505"
+    assert call["params"]["type"] == "0"
+    assert call["params"]["wts"]
+    assert call["params"]["w_rid"]
     assert call["headers"]["Referer"] == "https://live.bilibili.com/21452505"
 
 
 def test_get_live_room_info_and_danmu_info_degrade() -> None:
     assert _client(FakeSession()).get_live_room_info(0) == {}
-    session = FakeSession([FakeResponse(_ROOM_INFO), FakeResponse({"code": -400, "message": "请求错误"})])
+    session = FakeSession([FakeResponse(_ROOM_INFO), FakeResponse(_NAV_WBI), FakeResponse({"code": -400, "message": "请求错误"})])
     assert _client(session).get_live_danmu_info(5440) == {}
 
 
@@ -142,3 +155,108 @@ def test_like_comment_posts_form_and_degrades() -> None:
     assert _client(FakeSession()).like_comment(oid=0, rpid=9) is False
     denied = FakeSession([FakeResponse({"code": -412, "message": "风控"})])
     assert _client(denied).like_comment(oid=1, rpid=2) is False
+
+
+# ── 投币 / 分享 / 收藏 ──
+
+_FAV_FOLDERS = {
+    "code": 0,
+    "data": {
+        "list": [
+            {"id": 101, "fid": 101, "title": "默认收藏夹", "media_count": 3, "attr": 1},
+            "bad",
+        ],
+        "count": 1,
+    },
+}
+
+
+def test_coin_video_resolves_bv_and_defaults_to_one_coin() -> None:
+    session = FakeSession([FakeResponse(_VIEW), FakeResponse({"code": 0, "data": {}})])
+    assert _client(session).coin_video("https://www.bilibili.com/video/BV1xx411c7mD/") is True
+    assert session.calls[0]["params"] == {"bvid": "BV1xx411c7mD"}
+    call = session.calls[-1]
+    assert call["method"] == "POST"
+    assert call["url"].endswith("/x/web-interface/coin/add")
+    assert call["data"] == {"aid": 170001, "multiply": 1, "csrf": "bili-jct"}
+
+
+def test_coin_video_two_coins_av_and_failures() -> None:
+    session = FakeSession([FakeResponse({"code": 0, "data": {}})])
+    assert _client(session).coin_video("av170001", 2) is True
+    assert len(session.calls) == 1
+    assert session.calls[0]["data"] == {"aid": 170001, "multiply": 2, "csrf": "bili-jct"}
+
+    limited = _client(FakeSession([FakeResponse({"code": -412, "message": "请求被拦截"})]))
+    assert limited.coin_video("av170001") is False
+    assert limited._write_interval > 1.0  # type: ignore[attr-defined]
+    assert _client(FakeSession()).coin_video("不是视频") is False
+
+
+def test_share_video_posts_bvid_and_resolves_av() -> None:
+    session = FakeSession([FakeResponse({"code": 0, "data": {}})])
+    assert _client(session).share_video("BV1xx411c7mD") is True
+    assert len(session.calls) == 1
+    call = session.calls[0]
+    assert call["url"].endswith("/x/web-interface/share/add")
+    assert call["data"] == {"bvid": "BV1xx411c7mD", "csrf": "bili-jct"}
+
+    av_session = FakeSession([FakeResponse(_VIEW), FakeResponse({"code": 0, "data": {}})])
+    assert _client(av_session).share_video("av170001") is True
+    assert av_session.calls[0]["params"] == {"aid": 170001}
+    assert av_session.calls[-1]["data"]["bvid"] == "BV1xx411c7mD"
+
+
+def test_share_video_degrades() -> None:
+    denied = FakeSession([FakeResponse({"code": -101, "message": "未登录"})])
+    assert _client(denied).share_video("av170001") is False
+    assert _client(FakeSession()).share_video("不是视频") is False
+
+
+def test_interaction_writes_require_login() -> None:
+    client = _client(FakeSession())
+    client._bili_jct = ""  # type: ignore[attr-defined]
+    assert client.coin_video("av170001") is False
+    assert client.share_video("av170001") is False
+    assert client.favorite_video("av170001", 101) is False
+    assert client.get_favorite_folders() == []
+
+
+def test_get_favorite_folders_lists_created_folders() -> None:
+    session = FakeSession([FakeResponse(_FAV_FOLDERS)])
+    folders = _client(session).get_favorite_folders()
+    assert folders == [
+        {"id": 101, "fid": 101, "title": "默认收藏夹", "media_count": 3, "attr": 1}
+    ]
+    call = session.calls[0]
+    assert call["method"] == "GET"
+    assert call["url"].endswith("/x/v3/fav/folder/created/list-all")
+    assert call["params"] == {"up_mid": 7}
+
+
+def test_get_favorite_folders_degrades() -> None:
+    denied = FakeSession([FakeResponse({"code": -101, "message": "未登录"})])
+    assert _client(denied).get_favorite_folders() == []
+    empty = FakeSession([FakeResponse({"code": 0, "data": {"list": None}})])
+    assert _client(empty).get_favorite_folders() == []
+
+
+def test_favorite_video_posts_deal_form_and_degrades() -> None:
+    session = FakeSession([FakeResponse(_VIEW), FakeResponse({"code": 0, "data": {}})])
+    assert _client(session).favorite_video("BV1xx411c7mD", 101) is True
+    assert session.calls[0]["params"] == {"bvid": "BV1xx411c7mD"}
+    call = session.calls[-1]
+    assert call["method"] == "POST"
+    assert call["url"].endswith("/x/v3/fav/resource/deal")
+    assert call["data"] == {
+        "rid": 170001,
+        "type": 2,
+        "add_media_ids": 101,
+        "del_media_ids": "",
+        "csrf": "bili-jct",
+    }
+
+    assert _client(FakeSession()).favorite_video("av170001", 0) is False
+    assert _client(FakeSession()).favorite_video("不是视频", 101) is False
+    denied = FakeSession([FakeResponse({"code": -111, "message": "csrf校验失败"})])
+    assert _client(denied).favorite_video("av170001", 101) is False

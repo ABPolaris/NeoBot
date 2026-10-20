@@ -33,7 +33,7 @@ VC_BASE = "https://api.vc.bilibili.com"
 _NAV_URL = f"{API_BASE}/x/web-interface/nav"
 _REPLY_FEED_URL = f"{API_BASE}/x/msgfeed/reply"
 _AT_FEED_URL = f"{API_BASE}/x/msgfeed/at"
-_VIDEO_COMMENTS_URL = f"{API_BASE}/x/v2/reply/main"
+_COMMENT_MAIN_URL = f"{API_BASE}/x/v2/reply/wbi/main"
 _COMMENT_ADD_URL = f"{API_BASE}/x/v2/reply/add"
 _COMMENT_REPLIES_URL = f"{API_BASE}/x/v2/reply/reply"
 _DYNAMIC_CREATE_URL = f"{API_BASE}/x/dynamic/feed/create/dyn"
@@ -45,6 +45,10 @@ _SPACE_VIDEOS_URL = f"{API_BASE}/x/space/arc/search"
 _PLAYER_INFO_URL = f"{API_BASE}/x/player/wbi/v2"
 _PLAYURL_URL = f"{API_BASE}/x/player/wbi/playurl"
 _VIDEO_LIKE_URL = f"{API_BASE}/x/web-interface/archive/like"
+_VIDEO_COIN_URL = f"{API_BASE}/x/web-interface/coin/add"
+_VIDEO_SHARE_URL = f"{API_BASE}/x/web-interface/share/add"
+_FAV_FOLDER_LIST_URL = f"{API_BASE}/x/v3/fav/folder/created/list-all"
+_FAV_RESOURCE_DEAL_URL = f"{API_BASE}/x/v3/fav/resource/deal"
 _COMMENT_ACTION_URL = f"{API_BASE}/x/v2/reply/action"
 
 LIVE_API_BASE = "https://api.live.bilibili.com"
@@ -72,6 +76,13 @@ _WBI_FILTERED_CHARS = frozenset("!'()*")
 #: 命中这些业务错误码时加大写操作冷却时间（风控/评论限流）。
 _WRITE_RETRY_CODES = frozenset({-412, -799})
 
+#: 评论区类型（reply/type）：视频 1、动态 17、专栏/opus 12、番剧 11；3 与 23~32 未使用。
+_COMMENT_TYPES = frozenset(
+    {1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 33}
+)
+#: 排序：mode 2=按时间，3=按热度。
+_COMMENT_MODES = {"hot": 3, "time": 2}
+
 _BV_PATTERN = re.compile(r"(?i)bv1[0-9a-z]{9}")
 _AV_PATTERN = re.compile(r"(?i)(?<![0-9a-z])av(\d+)")
 
@@ -81,6 +92,11 @@ def _to_int(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _empty_comment_page() -> dict[str, Any]:
+    """评论页读取失败时的空结果（结构固定，调用方不用判空）。"""
+    return {"items": [], "cursor": "", "is_end": True, "raw": {}}
 
 
 def parse_video_id(identifier: str) -> tuple[str, int]:
@@ -316,41 +332,129 @@ class BilibiliClient:
         items = data.get("items") if isinstance(data, dict) else None
         return [item for item in items or [] if isinstance(item, dict)][: max(int(limit), 0)]
 
+    def get_comments(
+        self,
+        oid: int,
+        comment_type: int = 1,
+        *,
+        mode: str = "hot",
+        cursor: str | None = None,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        """拉一页评论区（wbi/main）：返回 {items, cursor, is_end, raw}。
+
+        comment_type 见 _COMMENT_TYPES（视频 1、动态 17、专栏/opus 12、番剧 11）；
+        cursor 传上一页返回的 cursor，空串表示第一页。失败返回空页。
+        """
+        oid = _to_int(oid)
+        comment_type = _to_int(comment_type)
+        if oid <= 0 or comment_type not in _COMMENT_TYPES:
+            return _empty_comment_page()
+        page_size = max(_to_int(page_size) or 20, 1)
+        params = self._sign_wbi(
+            {
+                "oid": oid,
+                "type": comment_type,
+                "mode": _COMMENT_MODES.get(str(mode).strip().lower(), 3),
+                "plat": 1,
+                "seek_rpid": "",
+                "web_location": "1315875",
+                "pagination_str": json.dumps(
+                    {"offset": str(cursor or "")}, separators=(",", ":")
+                ),
+            }
+        )
+        try:
+            payload = self._fetch("GET", _COMMENT_MAIN_URL, params=params)
+        except BilibiliError as exc:
+            self._log_read_error("评论读取", exc)
+            return _empty_comment_page()
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return _empty_comment_page()
+        items: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for item in data.get("replies") or []:
+            if not isinstance(item, dict):
+                continue
+            rpid = _to_int(item.get("rpid"))
+            if rpid and rpid in seen:  # 翻页边界会重复给同一条评论
+                continue
+            seen.add(rpid)
+            items.append(item)
+        cursor_info = data.get("cursor")
+        cursor_info = cursor_info if isinstance(cursor_info, dict) else {}
+        pagination = cursor_info.get("pagination_reply")
+        next_offset = pagination.get("next_offset") if isinstance(pagination, dict) else ""
+        return {
+            "items": items[:page_size],
+            "cursor": str(next_offset or ""),
+            "is_end": bool(cursor_info.get("is_end")) or not next_offset,
+            "raw": data,
+        }
+
+    def get_work_comments(
+        self,
+        identifier: str,
+        comment_type: int = 1,
+        *,
+        mode: str = "hot",
+        cursor: str | None = None,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        """按作品标识拉评论：视频 BV/av/链接先解析成 aid，动态/专栏/opus 用数字 ID。"""
+        oid = self._resolve_comment_oid(identifier)
+        if oid <= 0:
+            self._logger.warning(f"B站评论读取失败：无法解析作品号 {identifier!r}")
+            return _empty_comment_page()
+        return self.get_comments(
+            oid, comment_type, mode=mode, cursor=cursor, page_size=page_size
+        )
+
     def get_video_comments(
         self, oid: int, page: int = 1, *, order: str = "time"
     ) -> list[dict[str, Any]]:
-        """获取稿件/动态的评论列表。oid 为稿件 aid；order 为 time 或 hot。"""
-        params: dict[str, Any] = {
-            "type": 1,
-            "oid": int(oid),
-            "mode": 2 if order == "time" else 3,
-            "next": max(int(page) - 1, 0),
-        }
-        try:
-            params = self._sign_wbi(params)
-            payload = self._fetch("GET", _VIDEO_COMMENTS_URL, params=params)
-        except BilibiliError as exc:
-            self._log_read_error("视频评论读取", exc)
-            return []
-        data = payload.get("data")
-        replies = data.get("replies") if isinstance(data, dict) else None
-        return [item for item in replies or [] if isinstance(item, dict)]
+        """兼容旧接口：视频评论区（type=1）。page>1 时沿游标翻到第 page 页。"""
+        page = max(_to_int(page) or 1, 1)
+        result = self.get_comments(oid, 1, mode=order)
+        for _ in range(page - 1):
+            if result["is_end"] or not result["cursor"]:
+                return []
+            result = self.get_comments(oid, 1, mode=order, cursor=result["cursor"])
+        return result["items"]
 
     def get_comment_replies(
-        self, oid: int, root: int, *, page: int = 1, page_size: int = 20
+        self,
+        oid: int,
+        root: int,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        type_: int = 1,
+        cursor: str | int | None = None,
+        pn: int | None = None,
+        ps: int | None = None,
     ) -> list[dict[str, Any]]:
-        """获取一条根评论下的楼中楼回复（reply/reply 的 replies）；失败返回空列表。"""
+        """获取一条根评论下的楼中楼回复（reply/reply 的 replies）；失败返回空列表。
+
+        cursor/pn 是页码（兼容旧游标参数），ps 覆盖 page_size，type_ 是评论区类型。
+        """
         oid = _to_int(oid)
         root = _to_int(root)
         if oid <= 0 or root <= 0:
             return []
+        type_code = _to_int(type_)
+        if type_code not in _COMMENT_TYPES:
+            type_code = 1
+        page_no = max(_to_int(pn) or _to_int(cursor) or _to_int(page) or 1, 1)
+        page_len = max(_to_int(ps) or _to_int(page_size) or 20, 1)
         params = self._sign_wbi(
             {
-                "type": 1,
+                "type": type_code,
                 "oid": oid,
                 "root": root,
-                "pn": max(int(page), 1),
-                "ps": max(int(page_size), 1),
+                "pn": page_no,
+                "ps": page_len,
             }
         )
         try:
@@ -500,6 +604,93 @@ class BilibiliClient:
         self._logger.info(f"B站视频点赞成功: aid={aid}")
         return True
 
+    def coin_video(self, identifier: str, multiply: int = 1) -> bool:
+        """给视频投币：multiply=1 投一枚、2 投两枚；identifier 支持 BV/av/URL。"""
+        if not self._require_login("视频投币"):
+            return False
+        aid = self._resolve_video_aid(identifier)
+        if not aid:
+            self._logger.warning(f"B站视频投币失败：无法解析视频号 {identifier!r}")
+            return False
+        form: dict[str, Any] = {
+            "aid": aid,
+            "multiply": 2 if _to_int(multiply) >= 2 else 1,
+            "csrf": self._bili_jct,
+        }
+        self._rate_limit_wait()
+        try:
+            self._fetch("POST", _VIDEO_COIN_URL, data=form)
+        except BilibiliError as exc:
+            self._on_write_error("视频投币", exc)
+            return False
+        self._logger.info(f"B站视频投币成功: aid={aid} multiply={form['multiply']}")
+        return True
+
+    def share_video(self, identifier: str) -> bool:
+        """把视频分享到动态：identifier 支持 BV/av/URL（av 会先查 bvid）。"""
+        if not self._require_login("视频分享"):
+            return False
+        bvid, aid = parse_video_id(identifier)
+        if not bvid and aid:
+            bvid = str(self.get_video_info(f"av{aid}").get("bvid") or "").strip()
+        if not bvid:
+            self._logger.warning(f"B站视频分享失败：无法解析视频号 {identifier!r}")
+            return False
+        form: dict[str, Any] = {"bvid": bvid, "csrf": self._bili_jct}
+        self._rate_limit_wait()
+        try:
+            self._fetch("POST", _VIDEO_SHARE_URL, data=form)
+        except BilibiliError as exc:
+            self._on_write_error("视频分享", exc)
+            return False
+        self._logger.info(f"B站视频分享成功: bvid={bvid}")
+        return True
+
+    def get_favorite_folders(self) -> list[dict[str, Any]]:
+        """当前账号自建的收藏夹列表（folder/created/list-all 的 data.list）；失败返回空列表。"""
+        if not self._require_login("收藏夹读取"):
+            return []
+        up_mid = self.my_uid
+        if up_mid <= 0:
+            self._logger.warning("B站收藏夹读取失败：未取到自己的 UID")
+            return []
+        try:
+            payload = self._fetch("GET", _FAV_FOLDER_LIST_URL, params={"up_mid": up_mid})
+        except BilibiliError as exc:
+            self._log_read_error("收藏夹读取", exc)
+            return []
+        data = payload.get("data")
+        folders = data.get("list") if isinstance(data, dict) else None
+        return [item for item in folders or [] if isinstance(item, dict)]
+
+    def favorite_video(self, identifier: str, folder_id: int) -> bool:
+        """把视频收藏到指定收藏夹：folder_id 来自 get_favorite_folders。"""
+        if not self._require_login("视频收藏"):
+            return False
+        folder_id = _to_int(folder_id)
+        if folder_id <= 0:
+            self._logger.warning("B站视频收藏失败：缺少有效的收藏夹ID")
+            return False
+        aid = self._resolve_video_aid(identifier)
+        if not aid:
+            self._logger.warning(f"B站视频收藏失败：无法解析视频号 {identifier!r}")
+            return False
+        form: dict[str, Any] = {
+            "rid": aid,
+            "type": 2,
+            "add_media_ids": folder_id,
+            "del_media_ids": "",
+            "csrf": self._bili_jct,
+        }
+        self._rate_limit_wait()
+        try:
+            self._fetch("POST", _FAV_RESOURCE_DEAL_URL, data=form)
+        except BilibiliError as exc:
+            self._on_write_error("视频收藏", exc)
+            return False
+        self._logger.info(f"B站视频收藏成功: aid={aid} folder={folder_id}")
+        return True
+
     # ── 直播 ──
 
     def get_live_room_info(self, room_id: int) -> dict[str, Any]:
@@ -589,10 +780,12 @@ class BilibiliClient:
         if real_room_id <= 0:
             return {}
         try:
+            # getDanmuInfo 2026 起要求 wbi 签名；未签名会返回 -352（实测）。
+            params = self._sign_wbi({"id": real_room_id, "type": 0})
             payload = self._fetch(
                 "GET",
                 _LIVE_DANMU_INFO_URL,
-                params={"id": real_room_id, "type": 0},
+                params=params,
                 headers={"Referer": f"https://live.bilibili.com/{real_room_id}"},
             )
         except BilibiliError as exc:
@@ -1028,6 +1221,16 @@ class BilibiliClient:
             return 0
         return _to_int(self.get_video_info(bvid).get("aid"))
 
+    def _resolve_comment_oid(self, identifier: str) -> int:
+        """BV/av/URL -> aid；动态/专栏/opus 的数字 ID 直接当 oid。"""
+        text = str(identifier or "").strip()
+        bvid, aid = parse_video_id(text)
+        if aid:
+            return aid
+        if bvid:
+            return _to_int(self.get_video_info(bvid).get("aid"))
+        return _to_int(text)
+
     def _resolve_live_room_id(self, room_id: int) -> int:
         """短号/房间号 -> 真实房间号；查不到时原样返回输入值。"""
         room_id = _to_int(room_id)
@@ -1114,6 +1317,13 @@ class BilibiliClient:
         if code == -101:
             raise BilibiliAuthError(f"B站登录态失效: {message}")
         raise BilibiliApiError(code, message)
+
+    def _require_login(self, action: str) -> bool:
+        """需要登录态的操作前检查：缺 cookie 时直接失败，避免请求打到风控。"""
+        if self._sessdata and self._bili_jct:
+            return True
+        self._logger.warning(f"B站{action}失败：未登录")
+        return False
 
     def _rate_limit_wait(self) -> None:
         elapsed = time.monotonic() - self._last_write_at

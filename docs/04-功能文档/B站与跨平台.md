@@ -85,6 +85,36 @@ B站视频搜索/看视频走上面的 agent 工具（QQ 侧触发），直播�
 - 直播历史：每房间最近 500 条，带时间戳；间隔超过 5 分钟插入时间线。
 - 仍只处理 DANMU_MSG；礼物/SC/进场/舰长等事件未接入。
 
+## 扩展能力（2026-10-20）
+
+### 直播事件
+
+直播弹幕 WSS 现支持 DANMU_MSG、SEND_GIFT、SEND_GIFT_V2(protobuf)、GUARD_BUY、USER_TOAST_MSG_V2、SUPER_CHAT_MESSAGE、SUPER_CHAT_MESSAGE_DELETE、INTERACT_WORD_V2、开播/下播/看过人数等事件；镜像消息在解析层丢弃，礼物/SC/上舰/互动有去重键。认证使用 protover=3 + Brotli，op=8 校验，host 轮换，认证后立即补心跳。
+
+- bilibili_live__recent_events(room_id,count) 读最近 100 条礼物/SC/上舰/进房事件。
+- 可选 QQ 推送：配置 [bilibili] live_event_notify_targets（group:群号/private:QQ号，默认空）和 live_event_notify_kinds（默认 gift/super_chat/guard）；只推这些事件，不刷弹幕。
+- bilibili_live__record_clip(room_id,seconds) 按需录一小段 FLV（默认 30 秒，最大 300 秒）。
+- ASR/截帧/定时弹幕/跨聊天仍只在开播阶段生效。
+
+### 评论分页与类型
+
+- get_comments 使用 /x/v2/reply/wbi/main + pagination_str 游标；comment_type 支持 video(1)、dynamic(17)、article/opus(12)、bangumi(11)。
+- video_comments / comment_tree 支持 comment_type、limit、cursor；comment_tree 支持动态/专栏/opus 的楼中楼。
+- 已回复评论状态持久化（data/bilibili/comment_replies.json）；重启不重复回复。
+
+### 视频画面理解
+
+- bilibili_video_frames skill：video_frames 按 every 秒抽关键帧（最多 32 帧），生成 4x4 接触印相纸，可选视觉模型描述；返回本地路径，可用 read_image 细看。
+- 与 watch_video 的字幕/ASR 互补，解决“只有字幕、没有画面”的缺口。
+
+### B站只读扩展
+
+bilibili_read skill 工具：dynamic_detail、user_dynamics、article、bangumi、user_card、user_live_status、video_stream、video_danmaku、expand_b23。覆盖动态详情/用户动态、专栏 info/正文/cards、番剧 info/stream、用户名片、按 UID 直播状态、DASH/FLV 视频流、XML 视频弹幕、b23 短链展开；全部只读。
+
+### 视频互动
+
+bilibili_video 新增 coin_video / share_video / favorite_video / favorite_folders（写操作会以当前登录账号公开操作，需收藏夹 ID）。
+
 ## 风险
 
 - **评论已回复持久化**：评论监控把已处理评论记入 data/bilibili/comment_replies.json，重启后继续去重，避免反复回复同一评论。
