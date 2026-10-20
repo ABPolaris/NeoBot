@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import neobot_app.bilibili.reply_engine as reply_engine_module
@@ -29,7 +30,19 @@ class FakeProvider:
         self.calls.append(messages)
         if self.error is not None:
             raise self.error
-        response = {"role": "assistant", "content": self.content, "tool_calls": None}
+        name = "cancel" if self.content.strip().upper() == "[SKIP]" else "send_reply"
+        arguments = {} if name == "cancel" else {"text": self.content}
+        response = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
+                }
+            ],
+        }
         if self.usage is not None:
             response["extensions"] = {"usage": self.usage}
         return response
@@ -145,7 +158,9 @@ async def test_comment_reply_generation_uses_provider() -> None:
 
     assert result == "好哦"
     assert len(provider.calls) == 1
-    system, user = provider.calls[0]
+    messages = provider.calls[0]
+    system = next(item for item in messages if item.get("role") == "system")
+    user = next(item for item in messages if item.get("role") == "user")
     assert system["role"] == "system" and "B站" in system["content"]
     assert "你好" in user["content"]
 
@@ -272,7 +287,9 @@ async def test_task_reply_generation() -> None:
     result = await engine.generate_task_reply("告诉对方晚上开黑", history="对方:在吗")
 
     assert result == "收到"
-    system, user = provider.calls[0]
+    messages = provider.calls[0]
+    system = next(item for item in messages if item.get("role") == "system")
+    user = next(item for item in messages if item.get("role") == "user")
     assert "跨聊天任务" in system["content"]
     assert "告诉对方晚上开黑" in user["content"]
 
@@ -316,7 +333,8 @@ async def test_comment_video_link_enriches_prompt() -> None:
     assert video.calls == [("BV1xx411c7mD", 3000, 0)]
     assert "标题：视频标题" in ctx.video_context
     assert "来源：site" in ctx.video_context
-    _, user = provider.calls[0]
+    messages = provider.calls[0]
+    user = next(item for item in messages if item.get("role") == "user")
     assert "<相关视频>" in user["content"]
     assert "视频标题" in user["content"]
     assert "字幕摘要" in user["content"]
@@ -344,7 +362,8 @@ async def test_private_video_link_enriches_prompt() -> None:
 
     assert result == "在的"
     assert video.calls == [("https://www.bilibili.com/video/av170001", 3000, 0)]
-    _, user = provider.calls[0]
+    messages = provider.calls[0]
+    user = next(item for item in messages if item.get("role") == "user")
     assert "<相关视频>" in user["content"]
     assert "私信里的视频" in user["content"]
     assert "asr" in user["content"]
@@ -365,7 +384,8 @@ async def test_video_enrichment_timeout_degrades(monkeypatch) -> None:
     assert result == "好"
     assert video.calls
     assert ctx.video_context == ""
-    _, user = provider.calls[0]
+    messages = provider.calls[0]
+    user = next(item for item in messages if item.get("role") == "user")
     assert "<相关视频>" not in user["content"]
 
 
@@ -382,7 +402,8 @@ async def test_video_error_result_is_ignored() -> None:
 
     assert result == "好"
     assert video.calls
-    _, user = provider.calls[0]
+    messages = provider.calls[0]
+    user = next(item for item in messages if item.get("role") == "user")
     assert "<相关视频>" not in user["content"]
 
 
