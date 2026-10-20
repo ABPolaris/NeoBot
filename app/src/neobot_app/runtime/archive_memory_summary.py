@@ -1816,8 +1816,11 @@ class ArchiveMemoryAutoSummaryService:
             if manual
             else ""
         )
+        from neobot_app.runtime.compact import archive_compact_guide
+
         return (
             f"Current time: {current_time}\n"
+            f"{archive_compact_guide()}\n"
             f"trigger: {trigger}\n"
             f"The archive record below exceeded its storage limit and must be compressed now.\n"
             f"table_name: {table_name}\n"
