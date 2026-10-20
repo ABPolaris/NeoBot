@@ -428,8 +428,222 @@ class DuckDuckGoSearchEngine(BaseSearchEngine):
             )
 
 
+DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_QUOTA_ERROR = "DeepSeek 搜索额度不足（HTTP 402），已回退旧的搜索实现"
+DEEPSEEK_AUTH_ERROR = "DeepSeek 搜索 Key 无效（HTTP 401），已回退旧的搜索实现"
+
+
+class DeepSeekSearchEngine(BaseSearchEngine):
+    """DeepSeek Search 付费 API（POST /v1/tools/search，按请求次数计费）。
+
+    不在 auto 默认链里：只有显式 engine="deepseek" 才会构造/调用。
+    401/402 后进入冷却期（available=False），后续调用直接返回降级响应，
+    由 SearchManager 回退到 Bing → 浏览器 → DuckDuckGo。
+    """
+
+    name = "deepseek"
+    MIN_RERANK_SCORE = 1.5
+    MIN_AUTHORITY = 3
+
+    def __init__(
+        self,
+        api_key: str = "",
+        *,
+        base_url: str = DEEPSEEK_DEFAULT_BASE_URL,
+        timeout: float = 20.0,
+        quota_cooldown_seconds: float = 300.0,
+        auth_cooldown_seconds: float = 300.0,
+        quality_filter: bool = True,
+    ) -> None:
+        base = str(base_url or DEEPSEEK_DEFAULT_BASE_URL).rstrip("/")
+        # 配置里常把 OpenAI 风格的 /v1 写进 base_url；去重后再拼固定端点。
+        if base.endswith("/v1"):
+            base = base[:-3]
+        self.base_url = base or DEEPSEEK_DEFAULT_BASE_URL
+        self.endpoint = f"{self.base_url}/v1/tools/search"
+        self.api_key = str(api_key or "").strip()
+        self.timeout = timeout
+        self.quota_cooldown_seconds = max(0.0, float(quota_cooldown_seconds))
+        self.auth_cooldown_seconds = max(0.0, float(auth_cooldown_seconds))
+        self.quality_filter = bool(quality_filter)
+        self._disabled_until = 0.0
+        self.unavailable_reason = "" if self.api_key else "未配置 API Key"
+        self._disabled_error = (
+            f"DeepSeek 搜索不可用（{self.unavailable_reason}），已回退旧的搜索实现"
+            if not self.api_key
+            else ""
+        )
+
+    @property
+    def available(self) -> bool:
+        """Key 已配置且不处于 401/402 冷却期。"""
+        return bool(self.api_key) and time.monotonic() >= self._disabled_until
+
+    async def search(self, query: str, num_results: int = 10) -> SearchResponse:
+        t0 = time.perf_counter()
+        if not self.available:
+            return self._degraded(query, self._disabled_error or "DeepSeek 搜索不可用", t0)
+        payload = {
+            "query": query,
+            "count": max(1, min(50, int(num_results))),
+            "need_content": False,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.post(
+                    self.endpoint,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                )
+            if resp.status_code in (401, 402):
+                return self._disable(query, resp.status_code, t0)
+            resp.raise_for_status()
+            data = resp.json()
+            rows = (data.get("results") or []) if isinstance(data, dict) else []
+            results, filtered = self._parse(rows, num_results)
+            elapsed = (time.perf_counter() - t0) * 1000
+            if not results:
+                # API 正常但无匹配：不是故障，不触发回退。
+                return SearchResponse(
+                    query=query,
+                    results=[],
+                    engine=self.name,
+                    search_time_ms=elapsed,
+                    degraded=True,
+                    signals={"failure": "empty", "empty": True, "http_status": 200},
+                )
+            return SearchResponse(
+                query=query,
+                results=results,
+                engine=self.name,
+                total_estimated=len(results),
+                search_time_ms=elapsed,
+                signals={
+                    "http_status": 200,
+                    "quality_filter": self.quality_filter,
+                    "filtered": filtered,
+                },
+            )
+        except Exception as e:
+            return self._degraded(query, f"{type(e).__name__}: {e}", t0)
+
+    def _disable(self, query: str, status: int, t0: float) -> SearchResponse:
+        if status == 402:
+            cooldown = self.quota_cooldown_seconds
+            self.unavailable_reason = "额度不足（HTTP 402）"
+            error = DEEPSEEK_QUOTA_ERROR
+        else:
+            cooldown = self.auth_cooldown_seconds
+            self.unavailable_reason = "Key 无效（HTTP 401）"
+            error = DEEPSEEK_AUTH_ERROR
+        self._disabled_until = time.monotonic() + cooldown
+        self._disabled_error = error
+        return self._degraded(
+            query,
+            error,
+            t0,
+            signals={
+                "deepseek_unavailable": True,
+                "failure": "quota" if status == 402 else "auth",
+                "http_status": status,
+                "disabled_for_seconds": cooldown,
+            },
+        )
+
+    def _degraded(
+        self,
+        query: str,
+        error: str,
+        t0: float,
+        *,
+        signals: dict[str, Any] | None = None,
+    ) -> SearchResponse:
+        return SearchResponse(
+            query=query,
+            results=[],
+            engine=self.name,
+            error=error,
+            search_time_ms=(time.perf_counter() - t0) * 1000,
+            degraded=True,
+            signals=signals or {},
+        )
+
+    def _parse(
+        self, rows: list[Any], limit: int
+    ) -> tuple[list[SearchResult], int]:
+        parsed: list[SearchResult] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            display, raw_href = normalize_result_url(
+                self.base_url, str(row.get("url") or "")
+            )
+            title = str(row.get("title") or "").strip()
+            if not display or not title:
+                continue
+            content = str(row.get("content") or "").strip() or None
+            parsed.append(
+                SearchResult(
+                    index=0,
+                    title=title,
+                    url=display,
+                    snippet=str(row.get("summary") or row.get("snippet") or "").strip(),
+                    engine=self.name,
+                    content=content,
+                    content_fetched=bool(content),
+                    raw_url=raw_href,
+                    channel="api",
+                    published_at=str(row.get("date") or "") or None,
+                    site_name=str(row.get("site_name") or "") or host_of(display),
+                    rerank_score=self._as_float(row.get("rerank_score")),
+                    authority=self._as_int(row.get("authority")),
+                )
+            )
+        filtered = 0
+        if self.quality_filter and parsed:
+            preferred = [
+                result
+                for result in parsed
+                if (result.rerank_score or 0.0) >= self.MIN_RERANK_SCORE
+                or (result.authority if result.authority is not None else -1)
+                >= self.MIN_AUTHORITY
+            ]
+            # 阈值只是质量偏好：全都不达标时保留原结果，不能白花钱还交白卷。
+            if preferred:
+                filtered = len(parsed) - len(preferred)
+                parsed = preferred
+        parsed.sort(
+            key=lambda result: (
+                -(result.rerank_score if result.rerank_score is not None else 0.0),
+                -(result.authority if result.authority is not None else -1),
+            )
+        )
+        parsed = parsed[: max(1, int(limit))]
+        for index, result in enumerate(parsed):
+            result.index = index
+        return parsed, filtered
+
+    @staticmethod
+    def _as_float(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _as_int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+
 ENGINE_REGISTRY: dict[str, type[BaseSearchEngine]] = {
     "bing": BingSearchEngine,
+    "deepseek": DeepSeekSearchEngine,
     "duckduckgo": DuckDuckGoSearchEngine,
 }
 

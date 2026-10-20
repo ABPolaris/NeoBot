@@ -35,6 +35,7 @@ _REPLY_FEED_URL = f"{API_BASE}/x/msgfeed/reply"
 _AT_FEED_URL = f"{API_BASE}/x/msgfeed/at"
 _VIDEO_COMMENTS_URL = f"{API_BASE}/x/v2/reply/main"
 _COMMENT_ADD_URL = f"{API_BASE}/x/v2/reply/add"
+_COMMENT_REPLIES_URL = f"{API_BASE}/x/v2/reply/reply"
 _DYNAMIC_CREATE_URL = f"{API_BASE}/x/dynamic/feed/create/dyn"
 _DYNAMIC_IMAGE_UPLOAD_URL = f"{API_BASE}/x/dynamic/feed/draw/upload_bfs"
 _SEARCH_URL = f"{API_BASE}/x/web-interface/wbi/search/type"
@@ -300,6 +301,32 @@ class BilibiliClient:
             payload = self._fetch("GET", _VIDEO_COMMENTS_URL, params=params)
         except BilibiliError as exc:
             self._log_read_error("视频评论读取", exc)
+            return []
+        data = payload.get("data")
+        replies = data.get("replies") if isinstance(data, dict) else None
+        return [item for item in replies or [] if isinstance(item, dict)]
+
+    def get_comment_replies(
+        self, oid: int, root: int, *, page: int = 1, page_size: int = 20
+    ) -> list[dict[str, Any]]:
+        """获取一条根评论下的楼中楼回复（reply/reply 的 replies）；失败返回空列表。"""
+        oid = _to_int(oid)
+        root = _to_int(root)
+        if oid <= 0 or root <= 0:
+            return []
+        params = self._sign_wbi(
+            {
+                "type": 1,
+                "oid": oid,
+                "root": root,
+                "pn": max(int(page), 1),
+                "ps": max(int(page_size), 1),
+            }
+        )
+        try:
+            payload = self._fetch("GET", _COMMENT_REPLIES_URL, params=params)
+        except BilibiliError as exc:
+            self._log_read_error("楼中楼回复读取", exc)
             return []
         data = payload.get("data")
         replies = data.get("replies") if isinstance(data, dict) else None

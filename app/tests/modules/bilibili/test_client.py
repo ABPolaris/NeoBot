@@ -107,6 +107,41 @@ def test_get_video_comments_hot_uses_mode_3() -> None:
     assert session.calls[-1]["params"]["mode"] == "3"
 
 
+def test_get_comment_replies_hits_reply_reply_and_signs() -> None:
+    replies = [{"rpid": 11}, {"rpid": 12}]
+    session = FakeSession(
+        [
+            FakeResponse(_NAV_WBI),
+            FakeResponse({"code": 0, "data": {"replies": replies}}),
+        ]
+    )
+    result = _client(session).get_comment_replies(
+        oid=170001, root=9, page=2, page_size=10
+    )
+    assert result == replies
+    call = session.calls[-1]
+    assert call["url"].endswith("/x/v2/reply/reply")
+    params = call["params"]
+    # WBI 签名会把参数值统一转成字符串再计算 w_rid。
+    assert params["type"] == "1"
+    assert params["oid"] == "170001"
+    assert params["root"] == "9"
+    assert params["pn"] == "2"
+    assert params["ps"] == "10"
+    assert len(params["w_rid"]) == 32
+
+
+def test_get_comment_replies_returns_empty_on_error_or_bad_args() -> None:
+    session = FakeSession(
+        [FakeResponse(_NAV_WBI), FakeResponse({"code": -400, "message": "请求错误"})]
+    )
+    client = _client(session)
+    assert client.get_comment_replies(oid=170001, root=9) == []
+    assert client.get_comment_replies(oid=0, root=9) == []
+    assert client.get_comment_replies(oid=170001, root=0) == []
+    assert len(session.calls) == 2
+
+
 def test_send_comment_reply_posts_expected_form() -> None:
     session = FakeSession([FakeResponse({"code": 0, "data": {"rpid": 5566}})])
     assert _client(session).send_comment_reply(oid=1, root=2, parent=3, text="  hi  ")

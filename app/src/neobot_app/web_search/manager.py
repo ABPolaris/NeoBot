@@ -42,6 +42,11 @@ class SearchManager:
         browser_fallback: bool = True,
         engine_budgets: Optional[dict[str, float]] = None,
         browser_channel: Any = None,
+        deepseek_enabled: Optional[bool] = None,
+        deepseek_api_key: str = "",
+        deepseek_base_url: str = "",
+        deepseek_timeout_seconds: float = 20.0,
+        deepseek_quota_cooldown_seconds: float = 300.0,
     ) -> None:
         """
         Args:
@@ -57,15 +62,38 @@ class SearchManager:
             engine_budgets: 每级的时间预算（秒）。默认 duckduckgo=15s（部署实测它慢，
                 因此给固定上限而不是无限等）。
             browser_channel: 注入用（测试）；默认用进程级单例。
+            deepseek_enabled: 是否允许显式使用 DeepSeek 付费搜索；None 表示
+                按是否提供 deepseek_api_key 自动判断。
+            deepseek_api_key: DeepSeek API Key；缺省时 DeepSeek 不可用。
+            deepseek_base_url: DeepSeek API 根地址，空串用官方默认值。
+            deepseek_timeout_seconds: DeepSeek 单次请求超时。
+            deepseek_quota_cooldown_seconds: 402/401 后隐藏多久。
         """
         if engines is None:
             engines = ["bing", "duckduckgo"]
         names = [str(name) for name in engines]
+        # DeepSeek 是付费 API，且不在 auto 默认链里：只有显式 engine="deepseek"
+        # 才会走它。即使配置把它写进 engines，auto 也仍走旧的免费链路。
+        self._deepseek_api_key = str(deepseek_api_key or "").strip()
+        self._deepseek_enabled = (
+            bool(self._deepseek_api_key)
+            if deepseek_enabled is None
+            else bool(deepseek_enabled)
+        )
+        self._deepseek_base_url = str(deepseek_base_url or "").strip()
+        self._deepseek_timeout_seconds = float(deepseek_timeout_seconds)
+        self._deepseek_quota_cooldown_seconds = float(deepseek_quota_cooldown_seconds)
+        free_names = [name for name in names if name != "deepseek"]
         # DuckDuckGo 是"最后兜底"（fix(9) v2 §3）：它排在浏览器通道之后，
         # 而不是在主循环里先试一遍。即使调用方把它写在 engines 列表里，
         # 也统一挪到最后一级，避免"先付一次慢请求再走浏览器"。
-        self._degraded_engines = [name for name in names if name == "duckduckgo"]
-        self._engine_names = [name for name in names if name != "duckduckgo"] or list(names)
+        self._degraded_engines = [name for name in free_names if name == "duckduckgo"]
+        self._engine_names = [
+            name for name in free_names if name != "duckduckgo"
+        ] or list(free_names)
+        if not self._engine_names:
+            # engines 只写了 deepseek：auto 仍退回免费的 Bing。
+            self._engine_names = ["bing"]
         self._min_delay = min_delay
         self._max_retries = max_retries
         self._default_num_results = default_num_results
@@ -79,10 +107,50 @@ class SearchManager:
         #: 否则并发调用会同时通过检查，min_delay 形同虚设。
         self._locks: dict[str, asyncio.Lock] = {}
 
-    async def _get_engine(self, name: str) -> BaseSearchEngine:
+    def _get_engine(self, name: str) -> BaseSearchEngine:
         if name not in self._engines:
-            self._engines[name] = get_engine(name)
+            if name == "deepseek":
+                self._engines[name] = get_engine(
+                    name,
+                    api_key=self._deepseek_api_key,
+                    base_url=self._deepseek_base_url,
+                    timeout=self._deepseek_timeout_seconds,
+                    quota_cooldown_seconds=self._deepseek_quota_cooldown_seconds,
+                )
+            else:
+                self._engines[name] = get_engine(name)
         return self._engines[name]
+
+    @property
+    def deepseek_available(self) -> bool:
+        """DeepSeek 是否可用；402/401 后引擎 available=False，自动隐藏。"""
+        if not self._deepseek_enabled or not self._deepseek_api_key:
+            return False
+        engine = self._engines.get("deepseek")
+        if engine is None:
+            return True
+        return bool(getattr(engine, "available", False))
+
+    @property
+    def deepseek_unavailable_reason(self) -> str:
+        if not self._deepseek_enabled:
+            return "未启用（deepseek_enabled=false）"
+        if not self._deepseek_api_key:
+            return "未配置 API Key"
+        engine = self._engines.get("deepseek")
+        return (
+            str(getattr(engine, "unavailable_reason", "") or "")
+            if engine is not None
+            else ""
+        )
+
+    @property
+    def available_engines(self) -> list[str]:
+        """当前可用的引擎名；DeepSeek 不可用（未配置/额度不足）时不出现在这里。"""
+        names = list(dict.fromkeys([*self._engine_names, *self._degraded_engines]))
+        if self.deepseek_available:
+            names.append("deepseek")
+        return names
 
     def _lock_for(self, engine_name: str) -> asyncio.Lock:
         lock = self._locks.get(engine_name)
@@ -122,7 +190,17 @@ class SearchManager:
             num_results = self._default_num_results
 
         engine_name = engine or self._engine_names[0]
-        eng = await self._get_engine(engine_name)
+        if engine_name == "deepseek" and not self.deepseek_available:
+            reason = self.deepseek_unavailable_reason or "不可用"
+            return SearchResponse(
+                query=query,
+                results=[],
+                engine=engine_name,
+                error=f"DeepSeek 搜索不可用（{reason}），已回退旧的搜索实现",
+                degraded=True,
+                signals={"deepseek_unavailable": True, "fallback_reason": reason},
+            )
+        eng = self._get_engine(engine_name)
 
         sem = self._global_semaphore
 
@@ -144,6 +222,11 @@ class SearchManager:
                     return resp
                 if (getattr(resp, "signals", None) or {}).get("empty"):
                     # 页面明说"没有结果"：不是故障，直接交回上层，不要重试。
+                    resp.attempts = attempts
+                    resp.degraded = True
+                    return resp
+                if (getattr(resp, "signals", None) or {}).get("deepseek_unavailable"):
+                    # 额度/Key 问题重试只会再等一次退避；直接交给回退链路。
                     resp.attempts = attempts
                     resp.degraded = True
                     return resp
@@ -172,8 +255,15 @@ class SearchManager:
         self,
         query: str,
         num_results: Optional[int] = None,
+        *,
+        engine: Optional[str] = None,
     ) -> SearchResponse:
-        """依次搜索各引擎，失败时自动回退。"""
+        """依次搜索各引擎，失败时自动回退。
+
+        显式 engine 放在第一级（目前用于 deepseek）；auto（None）只走旧的免费链路
+        （Bing → 浏览器 → DDG），DeepSeek 永不在默认链里。显式 deepseek 不可用/
+        失败时继续走旧链路，并在 signals 里标注 deepseek_unavailable / fallback_reason。
+        """
         if num_results is None:
             num_results = self._default_num_results
 
@@ -181,6 +271,16 @@ class SearchManager:
         attempts = 0
         degraded = False
         stages: list[dict[str, Any]] = []
+        deepseek_fallback_reason = ""
+
+        def _mark_fallback(resp: SearchResponse) -> SearchResponse:
+            if deepseek_fallback_reason:
+                resp.signals = {
+                    **(resp.signals or {}),
+                    "deepseek_unavailable": True,
+                    "fallback_reason": deepseek_fallback_reason,
+                }
+            return resp
 
         async def _try(name: str, coro_factory: Any) -> SearchResponse | None:
             """跑一级：成功返回响应；空结果（页面明说没结果）直接收工；失败记 stages。"""
@@ -212,29 +312,46 @@ class SearchManager:
                 resp.attempts = attempts
                 resp.degraded = degraded or resp.degraded
                 resp.signals = {**(resp.signals or {}), "stages": stages}
-                return resp
+                return _mark_fallback(resp)
             if (resp.signals or {}).get("empty"):
                 # 页面明说"没有结果"：不是故障，继续回退只是浪费（v2 §1）。
                 attempts_total = attempts
-                return SearchResponse(
-                    query=query,
-                    results=[],
-                    engine=resp.engine,
-                    total_estimated=0,
-                    error=None,
-                    search_time_ms=sum(s.get("ms", 0) for s in stages),
-                    degraded=True,
-                    attempts=max(1, attempts_total),
-                    signals={**(resp.signals or {}), "stages": stages, "empty": True},
+                return _mark_fallback(
+                    SearchResponse(
+                        query=query,
+                        results=[],
+                        engine=resp.engine,
+                        total_estimated=0,
+                        error=None,
+                        search_time_ms=sum(s.get("ms", 0) for s in stages),
+                        degraded=True,
+                        attempts=max(1, attempts_total),
+                        signals={**(resp.signals or {}), "stages": stages, "empty": True},
+                    )
                 )
             errors.append(f"{name}: {resp.error or '结果为空/未通过校验'}")
             degraded = True
             return None
 
-        for name in self._engine_names:
+        # 显式 deepseek：不可用就直接记一级，不再发无意义的付费请求。
+        order = list(self._engine_names)
+        if engine == "deepseek":
+            if self.deepseek_available:
+                order.insert(0, "deepseek")
+            else:
+                reason = self.deepseek_unavailable_reason or "不可用"
+                deepseek_fallback_reason = f"DeepSeek 搜索不可用：{reason}"
+                degraded = True
+                stages.append({"stage": "deepseek", "kind": "unavailable", "reason": reason})
+        elif engine and engine not in order and engine not in self._degraded_engines:
+            order.insert(0, engine)
+
+        for name in order:
             done = await _try(name, lambda n=name: self.search(query, num_results, engine=n))
             if done is not None:
                 return done
+            if name == "deepseek":
+                deepseek_fallback_reason = errors[-1] if errors else "DeepSeek 搜索失败"
 
         # ② 浏览器脚本化通道：内容类失败的真正补救手段（换身份而非换站点）。
         if self._browser_fallback:
@@ -260,6 +377,10 @@ class SearchManager:
             if done is not None:
                 return done
 
+        signals: dict[str, Any] = {"stages": stages}
+        if deepseek_fallback_reason:
+            signals["deepseek_unavailable"] = True
+            signals["fallback_reason"] = deepseek_fallback_reason
         return SearchResponse(
             query=query,
             results=[],
@@ -267,7 +388,7 @@ class SearchManager:
             error="; ".join(errors) if errors else "所有引擎均无结果",
             degraded=True,
             attempts=max(1, attempts),
-            signals={"stages": stages},
+            signals=signals,
         )
 
     async def search_all(

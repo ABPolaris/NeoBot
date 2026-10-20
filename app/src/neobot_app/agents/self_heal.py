@@ -776,6 +776,11 @@ class SelfHealToolExecutor(ToolExecutor):
             max_rounds=ws.get("max_rounds", 5),
             preview_pages_limit=ws.get("preview_pages_limit", 30),
             variant_result_limit=ws.get("variant_result_limit", 6),
+            deepseek_enabled=ws.get("deepseek_enabled"),
+            deepseek_api_key=ws.get("deepseek_api_key", ""),
+            deepseek_base_url=ws.get("deepseek_base_url", ""),
+            deepseek_timeout_seconds=ws.get("deepseek_timeout_seconds", 20.0),
+            deepseek_quota_cooldown_seconds=ws.get("deepseek_quota_cooldown_seconds", 3600.0),
         )
 
     def reset_search(self) -> None:

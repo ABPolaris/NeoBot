@@ -4,7 +4,7 @@ covers:
   - app/src/neobot_app/web_search/
   - app/src/neobot_app/web_search_package.py
 verified_against: 528fe18
-verified_hash: d394b6928778
+verified_hash: 2eb9eac1ef8b
 ---
 
 # 10 联网搜索：HTTP(Bing) → 浏览器脚本化 → DuckDuckGo 三级回退

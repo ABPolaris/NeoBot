@@ -270,3 +270,79 @@ async def test_cross_chat_target_kind_validation_mentions_bilibili() -> None:
 
     assert result["ok"] is False
     assert "bilibili" in result["error"]
+
+
+# ── 直播通道 ──
+
+
+class FakeLive:
+    def __init__(self, *, live: bool = True) -> None:
+        self.live = live
+        self.history = [
+            {"uid": 8, "name": "观众甲", "text": "在吗", "time": "20:00:00"},
+            {"uid": 9, "name": "观众乙", "text": "唱首歌", "time": "20:00:01"},
+        ]
+        self.sent: list[tuple[int, str]] = []
+        self.live_calls: list[int] = []
+
+    async def is_live(self, room_id: int) -> bool:
+        self.live_calls.append(room_id)
+        return self.live
+
+    def get_history(self, room_id: int, count: int = 20) -> list[dict]:
+        return self.history[-count:]
+
+    async def send_danmaku(self, room_id: int, text: str) -> dict:
+        if not self.live:
+            return {"ok": False, "error": "未开播，不互动"}
+        self.sent.append((room_id, text))
+        return {"ok": True, "error": ""}
+
+
+def test_parse_conversation_id_live() -> None:
+    assert parse_conversation_id("live:5440") == {"kind": "live", "room_id": 5440}
+    assert parse_conversation_id("live:0") is None
+    assert parse_conversation_id("live:abc") is None
+
+
+async def test_channel_live_send_and_history() -> None:
+    live = FakeLive()
+    engine = FakeEngine("来了")
+    channel = BilibiliCrossChatChannel(None, engine, live)
+
+    ok, reply, detail = await channel.send_task("live:5440", "跟观众打个招呼")
+
+    assert ok is True
+    assert reply == "来了"
+    assert detail == "已发送到B站直播间"
+    assert live.sent == [(5440, "来了")]
+    assert live.live_calls == [5440]
+    assert "在吗" in engine.calls[0][1]
+
+    history = await channel.get_history("live:5440")
+    assert "观众甲:在吗" in history
+    assert "观众乙:唱首歌" in history
+
+
+async def test_channel_live_offline_does_not_generate_or_send() -> None:
+    live = FakeLive(live=False)
+    engine = FakeEngine()
+    channel = BilibiliCrossChatChannel(None, engine, live)
+
+    ok, reply, detail = await channel.send_task("live:5440", "说点什么")
+
+    assert ok is False
+    assert reply == ""
+    assert detail == "未开播，不互动"
+    assert engine.calls == []
+    assert live.sent == []
+
+
+async def test_channel_live_missing_interactor() -> None:
+    channel = BilibiliCrossChatChannel(FakeClient(), FakeEngine())
+
+    ok, _, detail = await channel.send_task("live:5440", "x")
+
+    assert ok is False
+    assert "直播交互器" in detail
+    assert await channel.get_history("live:5440") == ""

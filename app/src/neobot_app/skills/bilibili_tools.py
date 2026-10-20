@@ -2,7 +2,8 @@
 
 按 duck typing 调用并行实现的接口，不 import client/video 模块：
 - BilibiliService.client 提供 search / get_video_info / get_space_info /
-  get_user_videos / get_video_comments；
+  get_user_videos / get_video_comments / get_comment_replies；
+- 消息通知 get_reply_feed / get_at_feed（只读；复用 comment_monitor.parse_feed_item 归一化）；
 - 写操作 post_video_comment / like_video / like_comment（缺失时返回明确错误）；
 - BilibiliVideoService.watch 提供视频页面信息 + 字幕/ASR 转写。
 
@@ -19,6 +20,7 @@ import re
 from typing import Any
 
 from neobot_app.bilibili._compat import call_client, get_field
+from neobot_app.bilibili.comment_monitor import parse_feed_item
 from neobot_app.skills.base import SkillModule
 from neobot_app.utils.logger import get_module_logger
 
@@ -33,6 +35,8 @@ _SPACE_RE = re.compile(r"\s+")
 _VIDEO_ORDERS = ("totalrank", "click", "pubdate", "dm", "stow")
 _COMMENT_ORDERS = ("hot", "time")
 _PROFILE_CHARS = 1500
+#: comment_tree 一轮最多补拉的楼中楼根评论数（避免大 limit 时串行请求过多）。
+_TREE_FETCH_BUDGET = 10
 
 
 def _json(data: dict[str, Any]) -> str:
@@ -165,6 +169,53 @@ def _comment_item(raw: Any) -> dict[str, Any]:
         "ctime": _to_int(get_field(raw, "ctime")),
         "replies": _to_int(get_field(raw, "rcount", get_field(raw, "reply_count", 0))),
     }
+
+
+def _comment_node(raw: Any) -> dict[str, Any]:
+    """评论树节点：reply_count 是楼中楼总数，replies 留给子评论列表。"""
+    node = _comment_item(raw)
+    node["reply_count"] = node.pop("replies", 0)
+    node["replies"] = []
+    return node
+
+
+def _content_url(business_id: int, oid: int) -> str:
+    """通知没有 uri 时按内容类型拼一个可点链接。"""
+    if oid <= 0:
+        return ""
+    if business_id == 12:
+        return f"https://www.bilibili.com/read/cv{oid}"
+    if business_id in (11, 17):
+        return f"https://t.bilibili.com/{oid}"
+    return f"https://www.bilibili.com/video/av{oid}"
+
+
+def _message_item(event: Any) -> dict[str, Any]:
+    """把通知事件归一化成「谁、在哪、说了什么」。"""
+    oid = _to_int(get_field(event, "oid"))
+    business_id = _to_int(get_field(event, "business_id", 1)) or 1
+    url = str(get_field(event, "target_url", "") or "").strip()
+    return {
+        "source": "at" if get_field(event, "source", "") == "at_feed" else "reply",
+        "type": str(get_field(event, "target_type", "") or ""),
+        "oid": oid,
+        "title": _text(get_field(event, "target_title", "")),
+        "url": url if url.startswith("http") else _content_url(business_id, oid),
+        "comment": _text(get_field(event, "content", ""), 1000),
+        "uid": _to_int(get_field(event, "user_uid")),
+        "uname": _text(get_field(event, "user_name", "")),
+        "root_rpid": _to_int(get_field(event, "root_id")),
+        "parent_rpid": _to_int(get_field(event, "parent_id")),
+        "time": _to_int(get_field(event, "ctime")),
+    }
+
+
+def _flag(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(value)
 
 
 def _video_detail(data: Any) -> dict[str, Any]:
@@ -385,7 +436,10 @@ class BilibiliVideoSkill(_BilibiliToolBase):
 
     @property
     def description(self) -> str:
-        return "B站视频：查资料、看视频（字幕/语音转写）、拉评论、发评论与点赞"
+        return (
+            "B站视频：查资料、看视频（字幕/语音转写）、拉评论/评论树、"
+            "读消息通知、发评论与点赞"
+        )
 
     @property
     def instructions(self) -> str:
@@ -395,7 +449,13 @@ class BilibiliVideoSkill(_BilibiliToolBase):
             "  watch_video — 看视频：拉取B站页面字幕或语音识别转写，默认最多返回 3000 字符；"
             "超过 3000 字符的完整转写会自动存档，可用 read_video_transcript 按需读取。\n"
             "  read_video_transcript — 读取之前 watch_video 存档的完整转写（按 BV 号）。\n"
-            "  video_comments — 拉视频评论，order=hot（默认，热门）或 time（最新）。\n"
+            "  video_comments — 拉视频评论，order=hot（默认，热门）或 time（最新）；"
+            "要看楼中楼用 comment_tree。\n"
+            "  comment_tree — 拉评论区树：顶级评论 + 楼中楼；root_rpid 非 0 时只展开这条"
+            "评论下的回复。只读，不自动回复；看完可用 comment_video 回复、"
+            "comment_tree 继续展开。\n"
+            "  read_bili_messages — 读「回复我的」+「@我的」通知（标题、链接、评论、用户）。"
+            "只读，不自动回复；看完可用 comment_video / comment_tree 继续。\n"
             "  comment_video — 给视频发评论；root/parent 非 0 时回复指定楼中楼。\n"
             "  like_video — 点赞视频。\n"
             "  like_comment — 点赞视频下的一条评论（rpid 为评论ID）。\n\n"
@@ -465,6 +525,50 @@ class BilibiliVideoSkill(_BilibiliToolBase):
                         },
                     },
                     "required": ["identifier"],
+                },
+            ),
+            self._tool_def(
+                "comment_tree",
+                "拉取B站视频评论区树（顶级评论 + 楼中楼回复）。只读，不自动回复；"
+                "看完可用 comment_video 回复、comment_tree（root_rpid）继续展开某条楼中楼。",
+                {
+                    "properties": {
+                        "identifier": {
+                            "type": "string",
+                            "description": "BV号、av号或视频链接",
+                        },
+                        "root_rpid": {
+                            "type": "integer",
+                            "description": "根评论ID：0=拉顶级评论树；非0=只展开这条评论下的楼中楼",
+                            "default": 0,
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "最多返回多少条评论/回复，默认20",
+                            "default": 20,
+                        },
+                    },
+                    "required": ["identifier"],
+                },
+            ),
+            self._tool_def(
+                "read_bili_messages",
+                "读取B站的「回复我的」和「@我的」通知（标题、链接、评论、用户）。"
+                "只读，不自动回复；看完可用 comment_video 回复或 comment_tree 展开评论树。",
+                {
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "最多读取多少条通知，默认20",
+                            "default": 20,
+                        },
+                        "include_at": {
+                            "type": "boolean",
+                            "description": "是否同时读「@我的」通知，默认true",
+                            "default": True,
+                        },
+                    },
+                    "required": [],
                 },
             ),
             self._tool_def(
@@ -789,6 +893,103 @@ async def _handle_video_comments(skill: _BilibiliToolBase, args: dict) -> str:
     )
 
 
+async def _handle_comment_tree(skill: _BilibiliToolBase, args: dict) -> str:
+    identifier = _video_identifier(args.get("identifier"))
+    if not identifier:
+        return _json({"ok": False, "error": "缺少 identifier（BV号、av号或视频链接）"})
+    root_rpid = max(0, _to_int(args.get("root_rpid")))
+    limit = min(max(_to_int(args.get("limit")) or 20, 1), 50)
+    client = skill._require_client(
+        "get_video_info", "get_video_comments", "get_comment_replies"
+    )
+    oid = await _resolve_oid(client, identifier)
+    if not oid:
+        return _json({"ok": False, "error": f"无法从 {identifier} 解析出视频号"})
+
+    if root_rpid:
+        replies = await call_client(client.get_comment_replies, oid, root_rpid)
+        comments = [
+            _comment_node(item) for item in replies or [] if isinstance(item, dict)
+        ][:limit]
+        return _json(
+            {
+                "ok": True,
+                "oid": oid,
+                "root_rpid": root_rpid,
+                "count": len(comments),
+                "comments": comments,
+            }
+        )
+
+    kwargs = _call_kwargs(client.get_video_comments, {"page": 1, "order": "hot"})
+    roots = await call_client(client.get_video_comments, oid, **kwargs)
+    comments: list[dict[str, Any]] = []
+    fetches = 0
+    for raw in roots or []:
+        if len(comments) >= limit:
+            break
+        if not isinstance(raw, dict):
+            continue
+        node = _comment_node(raw)
+        inline = raw.get("replies")
+        children = (
+            [item for item in inline if isinstance(item, dict)]
+            if isinstance(inline, list)
+            else []
+        )
+        # shortcut: 一轮最多补拉 _TREE_FETCH_BUDGET 条根评论的楼中楼；要看更多用 root_rpid 单独展开。
+        if not children and node["reply_count"] > 0 and fetches < _TREE_FETCH_BUDGET:
+            fetches += 1
+            fetched = await call_client(client.get_comment_replies, oid, node["rpid"])
+            children = [item for item in fetched or [] if isinstance(item, dict)]
+        node["replies"] = [_comment_node(item) for item in children][:limit]
+        comments.append(node)
+    return _json(
+        {"ok": True, "oid": oid, "root_rpid": 0, "count": len(comments), "comments": comments}
+    )
+
+
+async def _handle_read_bili_messages(skill: _BilibiliToolBase, args: dict) -> str:
+    limit = min(max(_to_int(args.get("limit")) or 20, 1), 50)
+    include_at = _flag(args.get("include_at"), True)
+    sources = (("get_reply_feed", "reply_feed"), ("get_at_feed", "at_feed"))
+    if not include_at:
+        sources = sources[:1]
+    client = skill._require_client(*(method for method, _ in sources))
+    messages: list[dict[str, Any]] = []
+    seen: set[tuple[int, int]] = set()
+    for method, source in sources:
+        feed = await call_client(getattr(client, method), limit=limit)
+        for raw in feed or []:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                event = parse_feed_item(raw, source)
+            except Exception:
+                continue
+            if event is None:
+                continue
+            key = (event.oid, event.parent_id)
+            if key in seen:  # 同一条评论可能同时出现在两个通知流里
+                continue
+            seen.add(key)
+            messages.append(_message_item(event))
+    messages.sort(key=lambda item: item["time"], reverse=True)
+    payload: dict[str, Any] = {
+        "ok": True,
+        "count": len(messages),
+        "include_at": include_at,
+        "messages": messages[:limit],
+        "note": "只读通知，不会自动回复；看完可用 comment_video 回复、comment_tree 展开楼中楼。",
+    }
+    if not payload["messages"]:
+        payload["note"] = (
+            "没有读到B站消息（可能没有新的回复/@，或接口失败/登录失效）；"
+            "只读，不会自动回复。"
+        )
+    return _json(payload)
+
+
 async def _handle_comment_video(skill: _BilibiliToolBase, args: dict) -> str:
     identifier = _video_identifier(args.get("identifier"))
     if not identifier:
@@ -1038,6 +1239,8 @@ _HANDLERS = {
     "watch_video": _handle_watch_video,
     "read_video_transcript": _handle_read_video_transcript,
     "video_comments": _handle_video_comments,
+    "comment_tree": _handle_comment_tree,
+    "read_bili_messages": _handle_read_bili_messages,
     "comment_video": _handle_comment_video,
     "like_video": _handle_like_video,
     "like_comment": _handle_like_comment,

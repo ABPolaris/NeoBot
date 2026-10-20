@@ -1678,6 +1678,24 @@ class WebSearchConfig:
             )
         },
     )
+    deepseek_enabled: bool = field(
+        default=False,
+        metadata={
+            "description": (
+                "是否允许使用 DeepSeek Search 付费 API（默认关闭）。"
+                "开启后搜索工具仍默认走免费的 Bing/DDG；只有显式 engine=deepseek 才使用；"
+                "额度不足/Key 无效时自动隐藏并回退旧实现。Key 复用 env 的 DeepSeek_APIKey。"
+            )
+        },
+    )
+    deepseek_timeout_seconds: float = field(
+        default=20.0,
+        metadata={"description": "DeepSeek Search 单次请求超时（秒）"},
+    )
+    deepseek_quota_cooldown_seconds: int = field(
+        default=300,
+        metadata={"description": "DeepSeek 额度不足/Key 失效后隐藏多久（秒，默认 5 分钟）"},
+    )
 
 
 @dataclass

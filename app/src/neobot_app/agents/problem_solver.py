@@ -723,6 +723,11 @@ class ProblemSolverToolExecutor(ToolExecutor):
             browser_fallback=ws.get("browser_fallback", True),
             browser_timeout_seconds=ws.get("browser_timeout_seconds", 8.0),
             engine_budgets=ws.get("engine_budgets"),
+            deepseek_enabled=ws.get("deepseek_enabled"),
+            deepseek_api_key=ws.get("deepseek_api_key", ""),
+            deepseek_base_url=ws.get("deepseek_base_url", ""),
+            deepseek_timeout_seconds=ws.get("deepseek_timeout_seconds", 20.0),
+            deepseek_quota_cooldown_seconds=ws.get("deepseek_quota_cooldown_seconds", 3600.0),
         )
         self._sandbox = sandbox_service
         self._vision_provider = vision_provider

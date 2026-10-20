@@ -28,6 +28,10 @@ class SearchResult:
     published_at: Optional[str] = None
     site_name: str = ""
 
+    # DeepSeek Search 的相关性/权威度（0~3 / -1~4）；旧引擎留空。
+    rerank_score: Optional[float] = None
+    authority: Optional[int] = None
+
     def __post_init__(self) -> None:
         if not self.raw_url:
             self.raw_url = self.url

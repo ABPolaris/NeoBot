@@ -95,6 +95,7 @@ def build_all_skills(
     credential_manager: Any = None,
     sleep_service: Any = None,
     agent_provider: Any = None,
+    web_search_config: dict | None = None,
     **kwargs: Any,
 ) -> SkillManager:
     """创建 SkillManager 并注册所有可用的 Skill。
@@ -421,7 +422,7 @@ def build_all_skills(
             sandbox_service, state_dir=Path(kwargs.get("data_dir", ".")) / "agent_tools",
             credential_manager=credential_manager, provider=agent_provider,
             vision_provider=vision_provider, skill_manager=mgr, notification_hub=notification_hub,
-            config=tools_config,
+            config=tools_config, web_search_config=web_search_config,
         )
         owner = AgentToolsSkill(runtime)
         mgr.register(owner)

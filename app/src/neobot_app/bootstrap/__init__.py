@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any
@@ -188,6 +189,15 @@ def _web_search_config_dict(config: Any) -> dict[str, Any]:
         "browser_timeout_seconds": float(
             getattr(section, "browser_timeout_seconds", None) or 8.0
         ),
+        "deepseek_enabled": bool(getattr(section, "deepseek_enabled", False)),
+        "deepseek_timeout_seconds": float(
+            getattr(section, "deepseek_timeout_seconds", None) or 20.0
+        ),
+        "deepseek_quota_cooldown_seconds": int(
+            getattr(section, "deepseek_quota_cooldown_seconds", None) or 300
+        ),
+        "deepseek_api_key": os.environ.get("DeepSeek_APIKey", "").strip(),
+        "deepseek_base_url": os.environ.get("DeepSeek_URL", "").strip(),
     }
     budgets = getattr(section, "engine_timeout_seconds", None)
     if isinstance(budgets, dict) and budgets:
@@ -1051,6 +1061,7 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
         credential_manager=credential_manager,
         sleep_service=sleep_service,
         agent_provider=provider,
+        web_search_config=_web_search_config_dict(config),
     )
     plugin["host_facade"]._set_skills(skill_manager)
 

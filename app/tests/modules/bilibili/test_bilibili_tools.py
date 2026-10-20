@@ -614,3 +614,237 @@ async def test_like_failure_missing_rpid_and_missing_capability() -> None:
     assert missing["ok"] is False and "like_video" in missing["error"]
     assert missing_comment["ok"] is False and "like_comment" in missing_comment["error"]
 
+# ── 评论区树 / 消息通知（只读）──
+
+
+def _root(
+    rpid: int = 9, *, reply_count: int = 0, replies: list | None = None
+) -> dict:
+    raw = {
+        "rpid": rpid,
+        "member": {"uname": "甲", "mid": 2},
+        "content": {"message": "好看"},
+        "like": 3,
+        "ctime": 1_700_000_000,
+        "rcount": reply_count,
+    }
+    if replies is not None:
+        raw["replies"] = replies
+    return raw
+
+
+def _reply(rpid: int, text: str = "同意") -> dict:
+    return {
+        "rpid": rpid,
+        "member": {"uname": "乙", "mid": 3},
+        "content": {"message": text},
+        "like": 1,
+        "rcount": 0,
+    }
+
+
+_REPLY_FEED_ITEM = {
+    "id": 1,
+    "reply_time": 1_710_000_000,
+    "user": {"mid": 12, "nickname": "张三"},
+    "item": {
+        "subject_id": 170001,
+        "source_id": 100,
+        "root_id": 9,
+        "business_id": 1,
+        "message": "你的视频不错",
+        "title": "视频标题",
+        "uri": "https://www.bilibili.com/video/BV1xx411c7mD",
+    },
+}
+
+_AT_FEED_ITEM = {
+    "id": 2,
+    "at_time": 1_710_000_100,
+    "user": {"mid": 13, "nickname": "李四"},
+    "item": {
+        "subject_id": 55,
+        "source_id": 66,
+        "root_id": 0,
+        "business_id": 17,
+        "source_content": "这条评论 @了你",
+        "title": "动态标题",
+        "uri": "",
+    },
+}
+
+
+class TreeClient(FakeClient):
+    """评论区树 + 通知流替身：replies_of 按根评论 rpid 提供楼中楼。"""
+
+    def __init__(
+        self,
+        roots: list | None = None,
+        replies_of: dict[int, list] | None = None,
+        reply_feed: list | None = None,
+        at_feed: list | None = None,
+    ) -> None:
+        super().__init__()
+        self.roots = list(roots or [])
+        self.replies_of = dict(replies_of or {})
+        self.reply_feed = list(reply_feed or [])
+        self.at_feed = list(at_feed or [])
+        self.reply_calls: list[tuple[int, int]] = []
+        self.feed_calls: list[int] = []
+        self.at_calls: list[int] = []
+
+    async def get_video_comments(self, oid, page=1, order="hot"):
+        self.comment_calls.append((oid, page, order))
+        return self.roots
+
+    async def get_comment_replies(self, oid, root, *, page=1, page_size=20):
+        self.reply_calls.append((oid, root))
+        return self.replies_of.get(root, [])
+
+    async def get_reply_feed(self, limit=20):
+        self.feed_calls.append(limit)
+        return self.reply_feed
+
+    async def get_at_feed(self, limit=20):
+        self.at_calls.append(limit)
+        return self.at_feed
+
+
+async def test_comment_tree_uses_inline_replies() -> None:
+    client = TreeClient(roots=[_root(9, reply_count=1, replies=[_reply(10)])])
+    skill = BilibiliVideoSkill(client=client)
+
+    result = json.loads(
+        await skill.execute(
+            "comment_tree", {"identifier": "av170001", "limit": 5}
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["oid"] == 170001
+    assert result["count"] == 1
+    node = result["comments"][0]
+    assert node["rpid"] == 9
+    assert node["uname"] == "甲"
+    assert node["reply_count"] == 1
+    assert node["replies"][0]["rpid"] == 10
+    assert node["replies"][0]["content"] == "同意"
+    # 自带楼中楼时不再额外请求。
+    assert client.reply_calls == []
+    assert client.comment_calls == [(170001, 1, "hot")]
+
+
+async def test_comment_tree_fetches_missing_replies() -> None:
+    client = TreeClient(
+        roots=[_root(9, reply_count=2), _root(12)],
+        replies_of={9: [_reply(10), _reply(11, "同感")]},
+    )
+    skill = BilibiliVideoSkill(client=client)
+
+    result = json.loads(
+        await skill.execute(
+            "comment_tree", {"identifier": "av170001", "limit": 5}
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["count"] == 2
+    first, second = result["comments"]
+    assert [item["rpid"] for item in first["replies"]] == [10, 11]
+    assert second["replies"] == [] and second["reply_count"] == 0
+    assert client.reply_calls == [(170001, 9)]  # 只有带楼中楼的那条才补拉
+
+
+async def test_comment_tree_expands_one_root() -> None:
+    client = TreeClient(replies_of={9: [_reply(10)]})
+    skill = BilibiliVideoSkill(client=client)
+
+    result = json.loads(
+        await skill.execute(
+            "comment_tree", {"identifier": "av170001", "root_rpid": 9}
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["root_rpid"] == 9
+    assert [item["rpid"] for item in result["comments"]] == [10]
+    assert client.comment_calls == []
+    assert client.reply_calls == [(170001, 9)]
+
+
+async def test_comment_tree_requires_video_id_and_reply_capability() -> None:
+    skill = BilibiliVideoSkill(client=TreeClient())
+
+    missing = json.loads(await skill.execute("comment_tree", {}))
+    assert missing["ok"] is False and "identifier" in missing["error"]
+
+    legacy = BilibiliVideoSkill(client=FakeClient())
+    unsupported = json.loads(
+        await legacy.execute("comment_tree", {"identifier": "av170001"})
+    )
+    assert unsupported["ok"] is False
+    assert "get_comment_replies" in unsupported["error"]
+
+
+async def test_read_bili_messages_normalizes_and_dedupes() -> None:
+    client = TreeClient(
+        reply_feed=[_REPLY_FEED_ITEM],
+        at_feed=[_AT_FEED_ITEM, _REPLY_FEED_ITEM],
+    )
+    skill = BilibiliVideoSkill(client=client)
+
+    result = json.loads(await skill.execute("read_bili_messages", {"limit": 10}))
+
+    assert result["ok"] is True
+    assert result["count"] == 2
+    assert result["include_at"] is True
+    assert client.feed_calls == [10] and client.at_calls == [10]
+    # 按时间倒序；同一条评论出现在两个通知流里只留一条。
+    at_message, reply_message = result["messages"]
+    assert at_message["source"] == "at"
+    assert at_message["type"] == "动态"
+    assert at_message["url"] == "https://t.bilibili.com/55"
+    assert at_message["comment"] == "这条评论 @了你"
+    assert at_message["uname"] == "李四" and at_message["uid"] == 13
+    # 通知里 root_id=0 时按根评论=本条评论处理（与 comment_monitor 一致）。
+    assert at_message["root_rpid"] == 66 and at_message["parent_rpid"] == 66
+    assert reply_message["source"] == "reply"
+    assert reply_message["type"] == "视频"
+    assert reply_message["url"] == _VIDEO_URL
+    assert reply_message["title"] == "视频标题"
+    assert reply_message["comment"] == "你的视频不错"
+    assert reply_message["root_rpid"] == 9
+    assert reply_message["parent_rpid"] == 100
+    assert "只读" in result["note"]
+
+
+async def test_read_bili_messages_can_skip_at() -> None:
+    client = TreeClient(at_feed=[_AT_FEED_ITEM])
+    skill = BilibiliVideoSkill(client=client)
+
+    result = json.loads(
+        await skill.execute(
+            "read_bili_messages", {"limit": 5, "include_at": "false"}
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["include_at"] is False
+    assert result["messages"] == []
+    assert "没有读到" in result["note"]
+    assert client.feed_calls == [5]
+    assert client.at_calls == []
+
+
+def test_read_tools_are_explicitly_read_only() -> None:
+    tools = {
+        tool["function"]["name"]: tool["function"]
+        for tool in BilibiliVideoSkill(client=FakeClient()).get_tools()
+    }
+
+    assert {"comment_tree", "read_bili_messages"} <= set(tools)
+    for name in ("comment_tree", "read_bili_messages"):
+        description = tools[name]["description"]
+        assert "只读" in description
+        assert "不自动回复" in description
+        assert "comment_video" in description
