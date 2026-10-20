@@ -1152,6 +1152,58 @@ class ReplyOrchestrator:
                 return val
         return 50000
 
+    async def _compact_private_history(
+        self,
+        messages: list[dict],
+        *,
+        event: Any,
+        queue_key: str,
+    ) -> bool:
+        """私聊超限时把较早历史压成 DSH 风格检查点；失败返回 False。"""
+        from neobot_app.runtime.compact import compact_messages
+
+        try:
+            result = await compact_messages(
+                self._provider,
+                messages,
+                retain=8,
+                timeout=max(10.0, self._get_model_response_timeout_seconds(event)),
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "私聊上下文压缩失败",
+                event_id=event.event_id,
+                queue_key=queue_key,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return False
+        if not result:
+            self._logger.warning(
+                "私聊上下文压缩未产生有效检查点",
+                event_id=event.event_id,
+                queue_key=queue_key,
+            )
+            return False
+        original = len(messages)
+        messages[:] = result["messages"]
+        self._logger.info(
+            "私聊上下文已压缩",
+            event_id=event.event_id,
+            queue_key=queue_key,
+            removed_messages=result.get("removed", 0),
+            messages_before=original,
+            messages_after=len(messages),
+        )
+        self._record_debug(
+            "private_context_compacted",
+            event,
+            queue_key=queue_key,
+            removed=result.get("removed", 0),
+            before=original,
+            after=len(messages),
+        )
+        return True
+
     def _get_private_chat_new_message_collect_seconds(self) -> float:
         if self._config is not None:
             val = getattr(
@@ -3542,15 +3594,24 @@ class ReplyOrchestrator:
             estimated_tokens = self._estimate_tokens(
                 vision_context.request_messages(messages) if native_vision_active else messages
             )
-            # Token 超限 → 结束（下次消息触发管线重启）
+            # Token 超限 → 先做 compact 检查点；失败才结束会话。
             if estimated_tokens >= self._get_private_chat_max_tokens():
                 self._logger.info(
-                    "私聊token超限，结束当前会话",
+                    "私聊token超限，尝试 compact",
                     event_id=event.event_id,
                     queue_key=queue_key,
                     estimated_tokens=estimated_tokens,
                 )
-                break
+                if not await self._compact_private_history(
+                    messages, event=event, queue_key=queue_key
+                ):
+                    self._logger.info(
+                        "私聊token超限且 compact 未成功，结束当前会话",
+                        event_id=event.event_id,
+                        queue_key=queue_key,
+                        estimated_tokens=estimated_tokens,
+                    )
+                    break
 
             # 私聊挂起，等待新消息或后台通知
             self._logger.debug(
