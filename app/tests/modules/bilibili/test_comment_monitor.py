@@ -365,3 +365,27 @@ def test_parse_feed_item_maps_fields() -> None:
     assert event.root_id == 9
     assert event.parent_id == 8
     assert event.target_type == "视频"
+
+
+async def test_replied_comment_is_persisted_across_restart(tmp_path) -> None:
+    client = FakeClient([feed_item(notification_id=1)])
+    monitor = BilibiliCommentMonitor(
+        client,
+        FakeEngine("好哦"),
+        enabled=True,
+        data_dir=tmp_path,
+    )
+    assert await monitor.poll_once() == 1
+    state_file = tmp_path / "bilibili" / "comment_replies.json"
+    assert state_file.exists()
+
+    # 模拟进程重启：同一 feed 再拉一次，不能重复回复。
+    client2 = FakeClient([feed_item(notification_id=1)])
+    restarted = BilibiliCommentMonitor(
+        client2,
+        FakeEngine("好哦"),
+        enabled=True,
+        data_dir=tmp_path,
+    )
+    assert await restarted.poll_once() == 0
+    assert client2.sent == []
