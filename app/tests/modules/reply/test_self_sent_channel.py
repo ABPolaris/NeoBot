@@ -9,6 +9,8 @@ F17（语音保留原始文本 + 文件索引）、F14（通知入队并渲染�
 
 from __future__ import annotations
 
+import json
+
 from types import SimpleNamespace
 
 from neobot_adapter.model.basic import PostMessageMessagesender
@@ -148,7 +150,37 @@ def _sink(queue: MessageQueue, snapshot=None) -> SelfSentSink:
 
 def _assistant_texts(queue: MessageQueue) -> list[str]:
     messages = build_role_messages(queue, QUEUE_KEY, bot_account=BOT_QQ)
-    return [m["content"] for m in messages if m["role"] == "assistant"]
+    texts: list[str] = []
+    for message in messages:
+        if message.get("role") != "assistant":
+            continue
+        calls = message.get("tool_calls") or []
+        if calls:
+            arguments = calls[0].get("function", {}).get("arguments", "{}")
+            try:
+                texts.append(str(json.loads(arguments).get("text") or ""))
+            except (TypeError, ValueError):
+                texts.append("")
+        else:
+            texts.append(str(message.get("content") or ""))
+    return texts
+
+
+def _assistant_texts_from_messages(messages: list[dict]) -> list[str]:
+    texts: list[str] = []
+    for message in messages:
+        if message.get("role") != "assistant":
+            continue
+        calls = message.get("tool_calls") or []
+        if calls:
+            arguments = calls[0].get("function", {}).get("arguments", "{}")
+            try:
+                texts.append(str(json.loads(arguments).get("text") or ""))
+            except (TypeError, ValueError):
+                texts.append("")
+        else:
+            texts.append(str(message.get("content") or ""))
+    return texts
 
 
 def _message_entries(queue: MessageQueue) -> list:
@@ -308,7 +340,7 @@ def test_assistant_messages_carry_no_render_prefix() -> None:
     messages = build_role_messages(
         queue, QUEUE_KEY, numbering=MessageNumbering(), bot_account=BOT_QQ
     )
-    assistant = [m["content"] for m in messages if m["role"] == "assistant"]
+    assistant = _assistant_texts_from_messages(messages)
     user = [m["content"] for m in messages if m["role"] == "user"]
     # assistant 行不带任何标注：既没有「编号: 名字:」，也没有 [msg_id=...]
     # （后者的 msg_id 是负数合成 id，规则里本就不许出现；见 role_messages 注释）
@@ -343,7 +375,7 @@ def test_assistant_quoted_reply_has_no_prefix() -> None:
     queue.push(QUEUE_KEY, user)
 
     messages = build_role_messages(queue, QUEUE_KEY, bot_account=BOT_QQ)
-    assistant = [m["content"] for m in messages if m["role"] == "assistant"]
+    assistant = _assistant_texts_from_messages(messages)
     assert len(assistant) == 2
     assert assistant[0] == "[被回复消息] 我是一条鱼"
     assert assistant[1] == "我是一条鱼"
