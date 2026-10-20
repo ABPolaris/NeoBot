@@ -199,6 +199,14 @@ def build_all_skills(
             GroupManagementSkill(
                 adapter=adapter,
                 credential_manager=credential_manager,
+                reviewer=agent_provider,
+                auto_review=bool(
+                    getattr(getattr(getattr(config, "agent", None), "tools", None), "auto_review", True)
+                ),
+                review_timeout_seconds=float(
+                    getattr(getattr(getattr(config, "agent", None), "tools", None), "review_timeout_seconds", 30.0)
+                    or 30.0
+                ),
             )
         )
 
@@ -371,6 +379,14 @@ def build_all_skills(
             SandboxManagerSkill(
                 sandbox_service=sandbox_service,
                 credential_manager=credential_manager,
+                reviewer=agent_provider,
+                auto_review=bool(
+                    getattr(getattr(getattr(config, "agent", None), "tools", None), "auto_review", True)
+                ),
+                review_timeout_seconds=float(
+                    getattr(getattr(getattr(config, "agent", None), "tools", None), "review_timeout_seconds", 30.0)
+                    or 30.0
+                ),
                 sandbox_lock=sandbox_lock,
                 adapter=adapter,
                 file_server=file_server,
