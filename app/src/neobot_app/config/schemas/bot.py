@@ -1724,6 +1724,18 @@ class Bilibili:
         default="data/bilibili/cookies.json",
         metadata={"description": "B站登录 cookie 保存路径（相对数据目录）"},
     )
+    live_interaction_cooldown_seconds: float = field(
+        default=20.0,
+        metadata={"description": "直播间自动回复同房间冷却（秒）"},
+    )
+    live_interaction_max_reply_chars: int = field(
+        default=40,
+        metadata={"description": "直播间弹幕回复最大字符数"},
+    )
+    live_interaction_at_only: bool = field(
+        default=True,
+        metadata={"description": "直播间是否只回复 @bot 的弹幕（关闭后会对所有弹幕回复，慎用）"},
+    )
 
 
 @dataclass

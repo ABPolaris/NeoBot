@@ -3,6 +3,7 @@
 > 状态：已内嵌为官方内置插件，默认开启（2026-10-19）。
 > 目录：app/src/neobot_app/builtin_plugins/streaming_parser/；官方来源，可在面板启停/重载，不能安装/更新/卸载。
 > 许可：MIT（上游 SuperQuail/NeoBot_StreamingParser，版本 0.3.1）。
+> 注意：本插件只负责开播/下播监听与通知；直播弹幕交互是 B站模块的 /直播互动 命令，**与监听分开、不绑定**。
 
 ## 能力
 

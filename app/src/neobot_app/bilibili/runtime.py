@@ -7,12 +7,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import re
 from datetime import datetime, timedelta
 from typing import Any
 
 from neobot_app.bilibili.channel import BilibiliCrossChatChannel
 from neobot_app.bilibili.comment_monitor import BilibiliCommentMonitor
 from neobot_app.bilibili.diary import BilibiliDiaryService, BilibiliDiarySkill
+from neobot_app.bilibili.live_interact import BilibiliLiveInteractor
 from neobot_app.bilibili.media import BilibiliVideoService
 from neobot_app.bilibili.private_monitor import BilibiliPrivateMonitor
 from neobot_app.bilibili.reply_engine import BilibiliReplyEngine
@@ -85,6 +87,19 @@ class BilibiliRuntime:
         )
         self.diary_skill = BilibiliDiarySkill(self.diary)
         self.channel = BilibiliCrossChatChannel(self.service, self.engine)
+        self.live_interactor = BilibiliLiveInteractor(
+            self.service,
+            provider=provider,
+            bot_name=bot_name,
+            logger=self._logger,
+            cooldown_seconds=float(
+                getattr(cfg, "live_interaction_cooldown_seconds", 20.0) or 0.0
+            ),
+            max_reply_chars=int(
+                getattr(cfg, "live_interaction_max_reply_chars", 40) or 40
+            ),
+            at_only=bool(getattr(cfg, "live_interaction_at_only", True)),
+        )
         self._diary_task: asyncio.Task[None] | None = None
 
     # ── 生命周期 ──
@@ -102,6 +117,10 @@ class BilibiliRuntime:
             await self.private_monitor.start()
         except Exception:
             self._logger.exception("B站轮询器启动失败（已跳过）")
+        try:
+            await self.live_interactor.start()
+        except Exception:
+            self._logger.exception("B站直播交互器启动失败（已跳过）")
 
     async def stop(self) -> None:
         self._started = False
@@ -111,6 +130,10 @@ class BilibiliRuntime:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        try:
+            await self.live_interactor.stop()
+        except Exception:
+            self._logger.exception("B站直播交互器停止失败")
         for monitor in (self.comment_monitor, self.private_monitor):
             try:
                 await _maybe_await(monitor.stop())
@@ -202,6 +225,7 @@ class BilibiliRuntime:
 
         registry = command_service.registry
         self._register_login_command(registry, command_service)
+        self._register_live_commands(registry, command_service)
         if not _has_command(registry, "bili"):
             registry.register(
                 Command(
@@ -214,6 +238,112 @@ class BilibiliRuntime:
                         ("status", "查看B站登录与轮询状态"),
                         ("dynamic <文本>", "发布一条B站纯文本动态"),
                     ),
+                )
+            )
+
+    def _register_live_commands(self, registry: Any, command_service: Any) -> None:
+        """直播间交互命令；与 streaming_parser 监听插件完全独立。"""
+        from neobot_app.commands.model import PERM_EVERYONE, PERM_SUB_ADMIN, Command
+
+        async def _toggle(ctx: Any) -> str:
+            args = [str(a).strip() for a in (ctx.args or [])]
+            if len(args) < 2:
+                return "用法：/直播互动 <房间号|直播间链接> 开|关"
+            room_id = _digits(args[0])
+            if room_id <= 0:
+                return "没有从参数里找到直播间房间号"
+            action = _switch(args[1])
+            if action is None:
+                return "第二个参数只能是 开 或 关"
+            if action:
+                result = await self.live_interactor.enable(room_id, auto_reply=True)
+                if not result.get("ok"):
+                    return f"启用失败：{result.get('error') or '未知错误'}"
+                return (
+                    f"已启用直播间交互：{result.get('name') or room_id}（房间 {room_id}）。"
+                    "会自动监听弹幕，只在被 @ 时回复。"
+                )
+            result = await self.live_interactor.disable(room_id)
+            return f"已{'停用' if result.get('ok') else '未启用'}直播间 {room_id}"
+
+        async def _toggle_ai(ctx: Any) -> str:
+            args = [str(a).strip() for a in (ctx.args or [])]
+            if len(args) < 2:
+                return "用法：/直播互动AI <房间号> 开|关"
+            room_id = _digits(args[0])
+            action = _switch(args[1])
+            if room_id <= 0 or action is None:
+                return "房间号或开关参数无效"
+            result = await self.live_interactor.set_auto_reply(room_id, action)
+            if not result.get("ok"):
+                return f"设置失败：{result.get('error') or '未知错误'}"
+            return f"直播间 {room_id} 自动回复已{'打开' if action else '关闭'}"
+
+        async def _list(ctx: Any) -> str:
+            rooms = self.live_interactor.list_rooms()
+            if not rooms:
+                return "还没有启用的直播间交互；用 /直播互动 <房间号> 开 启用。"
+            lines = ["已启用的直播间交互："]
+            for room in rooms:
+                lines.append(
+                    f"- {room.get('name') or '(未命名)'}（{room.get('room_id')}，"
+                    f"真实房间 {room.get('real_room_id')}，"
+                    f"自动回复{'开' if room.get('auto_reply') else '关'}）"
+                )
+            return "\n".join(lines)
+
+        async def _speak(ctx: Any) -> str:
+            args = [str(a).strip() for a in (ctx.args or [])]
+            if len(args) < 2:
+                return "用法：/直播发言 <房间号|直播间链接> <文本>"
+            room_id = _digits(args[0])
+            text = " ".join(args[1:]).strip()
+            if room_id <= 0 or not text:
+                return "房间号或发言内容无效"
+            result = await self.live_interactor.send_danmaku(room_id, text)
+            if not result.get("ok"):
+                return f"发送失败：{result.get('error') or '未知错误'}"
+            return f"已发送直播间弹幕到 {room_id}"
+
+        for name, description, usage, handler, permission in (
+            (
+                "直播互动",
+                "启用/停用直播间弹幕交互（与开播监听插件无关）",
+                "<房间号|链接> 开|关",
+                _toggle,
+                PERM_SUB_ADMIN,
+            ),
+            (
+                "直播互动AI",
+                "开关某个直播间的自动回复（只回 @bot）",
+                "<房间号> 开|关",
+                _toggle_ai,
+                PERM_SUB_ADMIN,
+            ),
+            (
+                "直播互动列表",
+                "查看已启用的直播间交互",
+                "",
+                _list,
+                PERM_EVERYONE,
+            ),
+            (
+                "直播发言",
+                "用当前登录的B站账号手动发一条直播弹幕",
+                "<房间号|链接> <文本>",
+                _speak,
+                PERM_SUB_ADMIN,
+            ),
+        ):
+            if _has_command(registry, name):
+                continue
+            registry.register(
+                Command(
+                    name=name,
+                    description=description,
+                    usage=usage,
+                    permission=permission,
+                    handler=handler,
                 )
             )
 
@@ -297,6 +427,25 @@ class BilibiliRuntime:
             return f"已发布B站动态，dynamic_id={dyn_id}"
         return "用法：/bili [status|dynamic <文本>]"
 
+
+
+def _digits(value: Any) -> int:
+    match = re.search(r"\d+", str(value or ""))
+    if match is None:
+        return 0
+    try:
+        return int(match.group(0))
+    except ValueError:
+        return 0
+
+
+def _switch(value: Any) -> bool | None:
+    text = str(value or "").strip().lower()
+    if text in {"开", "开启", "on", "1", "true", "yes"}:
+        return True
+    if text in {"关", "关闭", "off", "0", "false", "no"}:
+        return False
+    return None
 
 def _has_command(registry: Any, name: str) -> bool:
     try:

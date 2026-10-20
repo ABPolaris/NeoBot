@@ -10,8 +10,32 @@ import io
 import json
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from neobot_app.skills.base import SkillModule
+
+_BILIBILI_WARNING = (
+    "模拟浏览器操作不带B站cookie且可能触发风控,请不要使用浏览器操作来访问B站; "
+    "请使用B站专用工具（bilibili_search/bilibili_video 等）。"
+)
+_BILIBILI_HOSTS = ("bilibili.com", "b23.tv")
+
+
+def _bilibili_warning(*urls: Any) -> dict[str, str]:
+    """传入入口 URL 与最终 URL；命中 B站域名时返回统一警告。"""
+    for raw in urls:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        try:
+            host = (
+                urlsplit(text if "://" in text else f"//{text}").hostname or ""
+            ).lower()
+        except ValueError:
+            continue
+        if any(host == domain or host.endswith(f".{domain}") for domain in _BILIBILI_HOSTS):
+            return {"warning": _BILIBILI_WARNING}
+    return {}
 
 
 def _convert_jpeg_file_to_png(jpg_path: str) -> bytes:
@@ -69,6 +93,7 @@ class BrowserSkill(SkillModule):
             "注意：\n"
             "  - @ref 在页面变化后失效，需重新 snapshot\n"
             "  - 网络/Cookie/Storage 操作请使用 browser_network 技能\n"
+            f"  - {_BILIBILI_WARNING}\n"
             "  - 仅处理简单的单页操作，复杂的多步调研委托给 background_trigger skill"
         )
 
@@ -327,8 +352,14 @@ async def _handle_open(self: BrowserSkill, args: dict) -> str:
             else:
                 result = await self._browser.open(url) if hasattr(self._browser, "open") else None
             if isinstance(result, dict) and result.get("success"):
-                return _json({"ok": True, "url": result.get("url", ""), "title": result.get("title", "")})
-            return _json({"ok": True, "note": "浏览器已就绪"})
+                final_url = result.get("url", "")
+                return _json({
+                    "ok": True,
+                    "url": final_url,
+                    "title": result.get("title", ""),
+                    **_bilibili_warning(url, final_url),
+                })
+            return _json({"ok": True, "note": "浏览器已就绪", **_bilibili_warning(url)})
 
     # 该聊天流还没有标签页，打开新标签页
     before_ids = {t["tab_id"] for t in self._parse_tabs(await self._browser.list_tabs()) if "tab_id" in t}
@@ -347,8 +378,14 @@ async def _handle_open(self: BrowserSkill, args: dict) -> str:
                 break
 
     if isinstance(result, dict) and result.get("success"):
-        return _json({"ok": True, "url": result.get("url", ""), "title": result.get("title", "")})
-    return _json({"ok": True, "note": "浏览器已就绪"})
+        final_url = result.get("url", "")
+        return _json({
+            "ok": True,
+            "url": final_url,
+            "title": result.get("title", ""),
+            **_bilibili_warning(url, final_url),
+        })
+    return _json({"ok": True, "note": "浏览器已就绪", **_bilibili_warning(url)})
 
 async def _handle_close(self: BrowserSkill, args: dict) -> str:
     pipeline_key = str(args.get("pipeline_key", "")).strip()
@@ -395,8 +432,14 @@ async def _handle_navigate(self: BrowserSkill, args: dict) -> str:
     if hasattr(self._browser, "navigate"):
         result = await self._browser.navigate(url)
         if isinstance(result, dict) and result.get("success"):
-            return _json({"ok": True, "url": result.get("url", url), "title": result.get("title", "")})
-    return _json({"ok": True, "note": f"已导航到 {url}"})
+            final_url = result.get("url", url)
+            return _json({
+                "ok": True,
+                "url": final_url,
+                "title": result.get("title", ""),
+                **_bilibili_warning(url, final_url),
+            })
+    return _json({"ok": True, "note": f"已导航到 {url}", **_bilibili_warning(url)})
 
 async def _handle_snapshot(self: BrowserSkill, args: dict) -> str:
     detailed = args.get("detailed", False)
@@ -572,8 +615,14 @@ async def _handle_dialog_status(self: BrowserSkill, args: dict) -> str:
 async def _handle_new_tab(self: BrowserSkill, args: dict) -> str:
     url = args.get("url", "")
     if hasattr(self._browser, "new_tab"):
-        await self._browser.new_tab(url)
-    return _json({"ok": True, "note": "已打开新标签页"})
+        result = await self._browser.new_tab(url)
+        if isinstance(result, dict) and result.get("success"):
+            return _json({
+                "ok": True,
+                "note": "已打开新标签页",
+                **_bilibili_warning(url, result.get("url", "")),
+            })
+    return _json({"ok": True, "note": "已打开新标签页", **_bilibili_warning(url)})
 
 async def _handle_switch_tab(self: BrowserSkill, args: dict) -> str:
     index = int(args.get("index", 0))

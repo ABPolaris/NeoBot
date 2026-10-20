@@ -11,6 +11,7 @@ import pytest
 
 import neobot_app.audio.asr as asr_module
 from neobot_app.audio.asr import ASRService
+from neobot_app.audio.ffmpeg_install import FFmpegTools
 from neobot_app.config.schemas.bot import ASR as ASRConfig
 
 
@@ -28,8 +29,12 @@ def _config(**overrides) -> ASRConfig:
     return ASRConfig(**values)
 
 
-def _make_service(handler, **overrides) -> ASRService:
-    return ASRService(_config(**overrides), transport=httpx.MockTransport(handler))
+def _make_service(handler, *, ffmpeg_resolver=None, **overrides) -> ASRService:
+    return ASRService(
+        _config(**overrides),
+        transport=httpx.MockTransport(handler),
+        ffmpeg_resolver=ffmpeg_resolver,
+    )
 
 
 async def _fake_prepare(source, out_dir):
@@ -182,14 +187,56 @@ async def test_transcoded_size_limit_is_enforced(tmp_path, monkeypatch):
 
 
 async def test_missing_ffmpeg_degrades(tmp_path, monkeypatch):
+    async def no_ffmpeg():
+        return None
+
     monkeypatch.setattr(asr_module.shutil, "which", lambda name: None)
-    service = _make_service(lambda request: httpx.Response(200, json={"text": "x"}))
+    service = _make_service(
+        lambda request: httpx.Response(200, json={"text": "x"}), ffmpeg_resolver=no_ffmpeg
+    )
     try:
         result = await service.transcribe(_audio_file(tmp_path))
     finally:
         await service.close()
 
     assert "ffmpeg" in result
+
+
+async def test_missing_ffmpeg_is_resolved_to_absolute_path(tmp_path, monkeypatch):
+    calls = []
+
+    async def fake_probe(source):
+        return 10.0
+
+    class _Completed:
+        returncode = 0
+        stderr = b""
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        Path(command[-1]).write_bytes(b"mp3")
+        return _Completed()
+
+    installed = tmp_path / "bin" / "ffmpeg.exe"
+    installed.parent.mkdir()
+    installed.write_bytes(b"fake")
+
+    async def resolver():
+        return FFmpegTools(installed, None)
+
+    monkeypatch.setattr(asr_module, "subprocess", SimpleNamespace(run=fake_run))
+    monkeypatch.setattr(asr_module.shutil, "which", lambda name: None)
+    service = _make_service(
+        lambda request: httpx.Response(200, json={"text": "ok"}), ffmpeg_resolver=resolver
+    )
+    monkeypatch.setattr(service, "_probe_duration", fake_probe)
+    try:
+        result = await service.transcribe(_audio_file(tmp_path))
+    finally:
+        await service.close()
+
+    assert result == "ok"
+    assert calls and calls[0][0] == str(installed)
 
 
 async def test_overlong_audio_is_rejected_before_transcode(tmp_path, monkeypatch):
