@@ -3,6 +3,7 @@
 按 duck typing 调用并行实现的接口，不 import client/video 模块：
 - BilibiliService.client 提供 search / get_video_info / get_space_info /
   get_user_videos / get_video_comments；
+- 写操作 post_video_comment / like_video / like_comment（缺失时返回明确错误）；
 - BilibiliVideoService.watch 提供视频页面信息 + 字幕/ASR 转写。
 
 所有失败都返回 {"ok": false, "error": "中文说明"}，不把异常栈丢给模型。
@@ -384,7 +385,7 @@ class BilibiliVideoSkill(_BilibiliToolBase):
 
     @property
     def description(self) -> str:
-        return "B站视频：查视频资料、看视频（字幕/语音转写）、拉评论"
+        return "B站视频：查资料、看视频（字幕/语音转写）、拉评论、发评论与点赞"
 
     @property
     def instructions(self) -> str:
@@ -394,9 +395,14 @@ class BilibiliVideoSkill(_BilibiliToolBase):
             "  watch_video — 看视频：拉取B站页面字幕或语音识别转写，默认最多返回 3000 字符；"
             "超过 3000 字符的完整转写会自动存档，可用 read_video_transcript 按需读取。\n"
             "  read_video_transcript — 读取之前 watch_video 存档的完整转写（按 BV 号）。\n"
-            "  video_comments — 拉视频评论，order=hot（默认，热门）或 time（最新）。\n\n"
+            "  video_comments — 拉视频评论，order=hot（默认，热门）或 time（最新）。\n"
+            "  comment_video — 给视频发评论；root/parent 非 0 时回复指定楼中楼。\n"
+            "  like_video — 点赞视频。\n"
+            "  like_comment — 点赞视频下的一条评论（rpid 为评论ID）。\n\n"
             "identifier 支持 BV号（如 BV1xx411c7mD）、av号（如 av170001）或完整视频链接。"
-            "看视频比查资料慢，先确认是不是目标视频；不要反复看同一个视频。"
+            "看视频比查资料慢，先确认是不是目标视频；不要反复看同一个视频。\n"
+            "写操作会以当前登录B站账号公开发言/点赞，确认用户意图后再调用；"
+            "失败通常是登录失效、已点赞或触发风控，不要反复重试。"
         )
 
     def get_tools(self) -> list[dict]:
@@ -459,6 +465,59 @@ class BilibiliVideoSkill(_BilibiliToolBase):
                         },
                     },
                     "required": ["identifier"],
+                },
+            ),
+            self._tool_def(
+                "comment_video",
+                "给B站视频发评论（会以当前登录B站账号公开发言，确认用户意图后再调用）；"
+                "root/parent 非0时回复指定楼中楼。",
+                {
+                    "properties": {
+                        "identifier": {
+                            "type": "string",
+                            "description": "BV号、av号或视频链接",
+                        },
+                        "text": {"type": "string", "description": "评论内容"},
+                        "root": {
+                            "type": "integer",
+                            "description": "楼中楼回复的根评论ID，0=发顶级评论",
+                            "default": 0,
+                        },
+                        "parent": {
+                            "type": "integer",
+                            "description": "楼中楼回复的目标评论ID，0=回复根评论",
+                            "default": 0,
+                        },
+                    },
+                    "required": ["identifier", "text"],
+                },
+            ),
+            self._tool_def(
+                "like_video",
+                "点赞B站视频（会以当前登录B站账号公开点赞，确认用户意图后再调用）。",
+                {
+                    "properties": {
+                        "identifier": {
+                            "type": "string",
+                            "description": "BV号、av号或视频链接",
+                        },
+                    },
+                    "required": ["identifier"],
+                },
+            ),
+            self._tool_def(
+                "like_comment",
+                "点赞B站视频下的一条评论（会以当前登录B站账号公开点赞，确认用户意图后再调用）；"
+                "identifier 用于解析视频号，rpid 是评论ID。",
+                {
+                    "properties": {
+                        "identifier": {
+                            "type": "string",
+                            "description": "BV号、av号或视频链接",
+                        },
+                        "rpid": {"type": "integer", "description": "要点赞的评论ID"},
+                    },
+                    "required": ["identifier", "rpid"],
                 },
             ),
         ]
@@ -730,6 +789,128 @@ async def _handle_video_comments(skill: _BilibiliToolBase, args: dict) -> str:
     )
 
 
+async def _handle_comment_video(skill: _BilibiliToolBase, args: dict) -> str:
+    identifier = _video_identifier(args.get("identifier"))
+    if not identifier:
+        return _json({"ok": False, "error": "缺少 identifier（BV号、av号或视频链接）"})
+    text = str(args.get("text") or "").strip()
+    if not text:
+        return _json({"ok": False, "error": "缺少 text（评论内容）"})
+    root = max(0, _to_int(args.get("root")))
+    parent = max(0, _to_int(args.get("parent")))
+    client = skill._require_client("post_video_comment")
+    try:
+        sent = await call_client(
+            client.post_video_comment, identifier, text, root=root, parent=parent
+        )
+    except Exception as exc:
+        logger.warning("B站发评论失败", identifier=identifier, error=str(exc))
+        return _json(
+            {
+                "ok": False,
+                "identifier": identifier,
+                "error": f"发评论失败：{exc}（可能登录失效或触发风控）",
+            }
+        )
+    if not sent:
+        return _json(
+            {
+                "ok": False,
+                "identifier": identifier,
+                "error": "发评论失败：B站未返回成功，可能登录失效、评论受限或触发风控",
+            }
+        )
+    return _json(
+        {
+            "ok": True,
+            "identifier": identifier,
+            "comment": text,
+            "root": root,
+            "parent": parent,
+        }
+    )
+
+
+async def _handle_like_video(skill: _BilibiliToolBase, args: dict) -> str:
+    identifier = _video_identifier(args.get("identifier"))
+    if not identifier:
+        return _json({"ok": False, "error": "缺少 identifier（BV号、av号或视频链接）"})
+    client = skill._require_client("like_video")
+    try:
+        liked = await call_client(client.like_video, identifier)
+    except Exception as exc:
+        logger.warning("B站视频点赞失败", identifier=identifier, error=str(exc))
+        return _json(
+            {
+                "ok": False,
+                "identifier": identifier,
+                "error": f"点赞失败：{exc}（可能登录失效或触发风控）",
+            }
+        )
+    if not liked:
+        return _json(
+            {
+                "ok": False,
+                "identifier": identifier,
+                "error": "点赞失败：B站未返回成功，可能登录失效、已点赞过或触发风控",
+            }
+        )
+    return _json({"ok": True, "identifier": identifier, "liked": True})
+
+
+async def _handle_like_comment(skill: _BilibiliToolBase, args: dict) -> str:
+    identifier = _video_identifier(args.get("identifier"))
+    if not identifier:
+        return _json({"ok": False, "error": "缺少 identifier（BV号、av号或视频链接）"})
+    rpid = _to_int(args.get("rpid"))
+    if rpid <= 0:
+        return _json({"ok": False, "error": "缺少或无效的 rpid（评论ID）"})
+    client = skill._require_client("get_video_info", "like_comment")
+    try:
+        oid = await _resolve_oid(client, identifier)
+    except Exception as exc:
+        logger.warning("B站评论点赞解析视频号失败", identifier=identifier, error=str(exc))
+        return _json(
+            {"ok": False, "identifier": identifier, "error": f"无法解析视频号：{exc}"}
+        )
+    if not oid:
+        return _json(
+            {
+                "ok": False,
+                "identifier": identifier,
+                "error": f"无法从 {identifier} 解析出视频号",
+            }
+        )
+    try:
+        liked = await call_client(client.like_comment, oid, rpid, type_=1)
+    except Exception as exc:
+        logger.warning("B站评论点赞失败", identifier=identifier, error=str(exc))
+        return _json(
+            {
+                "ok": False,
+                "identifier": identifier,
+                "error": f"评论点赞失败：{exc}（可能登录失效或触发风控）",
+            }
+        )
+    if not liked:
+        return _json(
+            {
+                "ok": False,
+                "identifier": identifier,
+                "error": "评论点赞失败：B站未返回成功，可能登录失效、已点赞过或触发风控",
+            }
+        )
+    return _json(
+        {
+            "ok": True,
+            "identifier": identifier,
+            "oid": oid,
+            "rpid": rpid,
+            "liked": True,
+        }
+    )
+
+
 async def _handle_user_info(skill: _BilibiliToolBase, args: dict) -> str:
     uid = _parse_uid(args.get("uid"))
     if not uid:
@@ -857,6 +1038,9 @@ _HANDLERS = {
     "watch_video": _handle_watch_video,
     "read_video_transcript": _handle_read_video_transcript,
     "video_comments": _handle_video_comments,
+    "comment_video": _handle_comment_video,
+    "like_video": _handle_like_video,
+    "like_comment": _handle_like_comment,
     "user_info": _handle_user_info,
     "user_videos": _handle_user_videos,
     "linked_qq_profile": _handle_linked_qq_profile,

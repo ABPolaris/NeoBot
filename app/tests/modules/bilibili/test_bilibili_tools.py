@@ -476,3 +476,141 @@ async def test_read_video_transcript_not_found() -> None:
     assert result["ok"] is True
     assert result["found"] is False
     assert "没有找到" in result["message"]
+
+
+# ── 写操作（评论 / 点赞）──
+
+
+class WriteClient(FakeClient):
+    """模拟并行实现的写接口；result=False 表示失败，error 模拟抛异常。"""
+
+    def __init__(self, result: bool = True, error: Exception | None = None) -> None:
+        super().__init__()
+        self.result = result
+        self.error = error
+        self.comment_calls: list[tuple] = []
+        self.like_calls: list[str] = []
+        self.like_comment_calls: list[tuple] = []
+
+    async def post_video_comment(self, identifier, text, *, root=0, parent=0):
+        self.comment_calls.append((identifier, text, root, parent))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    async def like_video(self, identifier):
+        self.like_calls.append(identifier)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    async def like_comment(self, oid, rpid, type_=1):
+        self.like_comment_calls.append((oid, rpid, type_))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+def test_video_skill_exposes_write_tools_with_public_action_warning() -> None:
+    tools = {
+        tool["function"]["name"]: tool["function"]
+        for tool in BilibiliVideoSkill(client=FakeClient()).get_tools()
+    }
+
+    assert {"comment_video", "like_video", "like_comment"} <= set(tools)
+    assert "确认用户意图后再调用" in tools["comment_video"]["description"]
+    assert "确认用户意图后再调用" in tools["like_video"]["description"]
+    assert "确认用户意图后再调用" in tools["like_comment"]["description"]
+
+
+async def test_comment_video_posts_top_level_and_reply() -> None:
+    client = WriteClient()
+    skill = BilibiliVideoSkill(client=client)
+
+    top = json.loads(
+        await skill.execute("comment_video", {"identifier": _VIDEO_URL, "text": "好看"})
+    )
+    reply = json.loads(
+        await skill.execute(
+            "comment_video",
+            {"identifier": "av170001", "text": "同意", "root": 9, "parent": 10},
+        )
+    )
+
+    assert top["ok"] is True
+    assert top["comment"] == "好看"
+    assert top["root"] == 0 and top["parent"] == 0
+    assert reply["ok"] is True
+    assert reply["root"] == 9 and reply["parent"] == 10
+    assert client.comment_calls == [
+        ("BV1xx411c7mD", "好看", 0, 0),
+        ("av170001", "同意", 9, 10),
+    ]
+    assert "好看" in json.dumps(top, ensure_ascii=False)
+
+
+async def test_comment_video_failure_and_missing_capability() -> None:
+    failing = BilibiliVideoSkill(client=WriteClient(result=False))
+    failed = json.loads(
+        await failing.execute("comment_video", {"identifier": "av170001", "text": "好"})
+    )
+    assert failed["ok"] is False
+    assert "风控" in failed["error"]
+
+    missing_text = json.loads(
+        await failing.execute("comment_video", {"identifier": "av170001"})
+    )
+    assert missing_text["ok"] is False and "text" in missing_text["error"]
+
+    legacy = BilibiliVideoSkill(client=FakeClient())
+    missing = json.loads(
+        await legacy.execute("comment_video", {"identifier": "av170001", "text": "好"})
+    )
+    assert missing["ok"] is False
+    assert "post_video_comment" in missing["error"]
+
+
+async def test_like_video_and_like_comment() -> None:
+    client = WriteClient()
+    skill = BilibiliVideoSkill(client=client)
+
+    video = json.loads(await skill.execute("like_video", {"identifier": _VIDEO_URL}))
+    comment = json.loads(
+        await skill.execute("like_comment", {"identifier": "av170001", "rpid": "9"})
+    )
+    resolved = json.loads(
+        await skill.execute("like_comment", {"identifier": _VIDEO_URL, "rpid": 9})
+    )
+
+    assert video["ok"] is True and video["liked"] is True
+    assert client.like_calls == ["BV1xx411c7mD"]
+    assert comment["ok"] is True
+    assert comment["oid"] == 170001 and comment["rpid"] == 9
+    assert resolved["oid"] == 170001
+    assert client.like_comment_calls == [(170001, 9, 1), (170001, 9, 1)]
+
+
+async def test_like_failure_missing_rpid_and_missing_capability() -> None:
+    failing = BilibiliVideoSkill(client=WriteClient(result=False))
+    video = json.loads(
+        await failing.execute("like_video", {"identifier": "av170001"})
+    )
+    comment = json.loads(
+        await failing.execute("like_comment", {"identifier": "av170001", "rpid": 9})
+    )
+    assert video["ok"] is False and "风控" in video["error"]
+    assert comment["ok"] is False and "风控" in comment["error"]
+
+    bad_rpid = json.loads(
+        await failing.execute("like_comment", {"identifier": "av170001", "rpid": 0})
+    )
+    assert bad_rpid["ok"] is False and "rpid" in bad_rpid["error"]
+
+    legacy = BilibiliVideoSkill(client=FakeClient())
+    missing = json.loads(await legacy.execute("like_video", {"identifier": "av170001"}))
+    missing_comment = json.loads(
+        await legacy.execute("like_comment", {"identifier": "av170001", "rpid": 9})
+    )
+    assert missing["ok"] is False and "like_video" in missing["error"]
+    assert missing_comment["ok"] is False and "like_comment" in missing_comment["error"]
+

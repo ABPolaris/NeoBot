@@ -12,7 +12,7 @@
 - **B站动态日记**：默认关闭；开启后可按每日时间生成聊天/档案摘要并发一条 B站纯文本动态，不读写 QQ 空间。agent 工具 publish_bilibili_diary 支持 preview。
 - **跨聊天通道**：cross_chat 增加 bilibili 目标，会话 ID 为 private:<uid> 或 comment:<oid>:<root>:<parent>。
 - **B站回复的视频链接增强**：评论/私信正文或评论树里出现 BV 号/bilibili.com 视频链接时，回复引擎自动调用 watch_video 取标题+字幕/ASR 摘要（最多 3000 字符），作为「相关视频」上下文交给模型；超过 3000 字符的完整转写自动存入 bilibili_video 档案，QQ 侧 agent 可用 read_video_transcript 按需读取；失败静默跳过，不阻断回复。
-- **外部 ASR**：硅基流动 OpenAI 兼容 /v1/audio/transcriptions，默认模型 XingChenAGI/XingChenASR-V3.2-Ultra（免费）；ffmpeg 转 16k 单声道 mp3，50MB/1 小时限制，错误降级为文本。
+- **外部 ASR**：硅基流动 OpenAI 兼容 /v1/audio/transcriptions，默认模型 XingChenAGI/XingChenASR-V3.2-Ultra（免费）；ffmpeg 转 16k 单声道 mp3，50MB/1 小时限制，错误降级为文本。本机没有 ffmpeg/ffprobe 时会自动并发镜像下载安装（BtbN win64 包，NCD 同款 7 个镜像竞速，失败清理由日志记录）。
 
 ## Agent 工具（QQ 侧触发）
 
@@ -27,6 +27,9 @@
 | bilibili_video__watch_video(identifier,max_chars,include_comments) | 看视频：站点字幕优先，无字幕走 ASR 转写；默认最多 3000 字符，返回 source=site/asr，可选热门评论；超长全文自动存档案 |
 | bilibili_video__read_video_transcript(identifier) | 按 BV 号读取 watch_video 存档的完整转写（转写超过 3000 字符时才有），用于按需读取 |
 | bilibili_video__video_comments(identifier,page,order) | 拉视频评论（热门/最新） |
+| bilibili_video__comment_video(identifier,text,root,parent) | 以当前登录账号给视频发评论/楼中楼回复（写操作，确认意图后调用） |
+| bilibili_video__like_video(identifier) | 给视频点赞（写操作） |
+| bilibili_video__like_comment(identifier,rpid) | 给视频评论点赞（写操作） |
 | bilibili_user__user_info(uid) | B站用户资料 |
 | bilibili_user__user_videos(uid,page) | 用户投稿列表 |
 | bilibili_user__linked_qq_profile(uid) | 按B站UID查关联的QQ主页：QQ号、备注、印象、user_summary/user_profile 档案；无关联明确提示 |
@@ -42,6 +45,22 @@
 - /bili status：查看登录/轮询状态（次级管理员）
 - /bili dynamic <文本>：发布一条 B站纯文本动态（次级管理员）
 
+## 直播间交互（与监听插件独立）
+
+直播间交互是 B站模块自带能力，**不依赖 streaming_parser 的监听订阅**，两者可分别开关：
+
+| 命令 | 权限 | 说明 |
+|---|---|---|
+| /直播互动 <房间号|链接> 开|关 | 次级管理员 | 启用/停用某房间弹幕交互并持久化 |
+| /直播互动AI <房间号> 开|关 | 次级管理员 | 开关该房间自动回复（只回 @bot，默认开） |
+| /直播互动列表 | 所有人 | 查看已启用房间、真实房间号、自动回复状态 |
+| /直播发言 <房间号|链接> <文本> | 次级管理员 | 用当前登录B站账号手动发一条弹幕 |
+
+- 使用当前 B站登录态（/login bilibili 的 cookie）；未登录时只能记录房间，发弹幕/自动回复不可用。
+- 自动回复：只对包含 bot 昵称/@bot 的弹幕、排除自己、同房间 20s 冷却 + 每分钟最多 3 条、回复截断 40 字符；provider 不可用时只监听。
+- 状态文件：data/bilibili/live_interact.json，重启自动恢复。
+- 直播监听（开播/下播通知）在 streaming_parser 插件里，和这里完全分开。
+
 ## 直播监听
 
 B站直播监听已内嵌为官方内置插件 streaming_parser（默认开启，命令见 docs/04-功能文档/B站直播监听.md）。
@@ -50,7 +69,7 @@ B站视频搜索/看视频走上面的 agent 工具（QQ 侧触发），直播�
 ## 风险
 
 - 前端控制台扫码页已实现：面板打开 /bilibili/login 扫码（需面板登录；远程访问受 allow_remote_manage 限制）。
-- 扫码成功、发评论/私信/动态、搜索/看视频/查用户均只经 mock + 匿名接口验证，未用真实账号全面实测；ASR 路径取决于 SiliconFlow key 与视频是否有公开字幕。
+- 扫码成功、发评论/私信/动态、搜索/看视频/查用户、直播间弹幕收发与点赞均只经 mock + 匿名接口验证，未用真实账号全面实测；写操作可能触发B站风控。ASR 路径取决于 SiliconFlow key 与视频是否有公开字幕。
 - 评论回复已记录 token 用量；@ 通知已支持（get_at_feed，与「回复我的」按 oid+parent_id 去重）。
 - B站接口为 Web 协议，存在风控/合规风险；默认关闭自动回复是安全边界。
 

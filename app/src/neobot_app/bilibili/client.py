@@ -1,4 +1,4 @@
-"""B 站 HTTP 客户端：登录态校验、评论/私信读写、动态发布。
+"""B 站 HTTP 客户端：登录态校验、评论/私信读写、动态发布、视频点赞与直播弹幕。
 
 所有方法都是同步实现（requests）。需要 async 的调用方用 asyncio.to_thread
 包一层即可（BilibiliService 已经这样做）。
@@ -43,6 +43,13 @@ _SPACE_INFO_URL = f"{API_BASE}/x/space/wbi/acc/info"
 _SPACE_VIDEOS_URL = f"{API_BASE}/x/space/arc/search"
 _PLAYER_INFO_URL = f"{API_BASE}/x/player/wbi/v2"
 _PLAYURL_URL = f"{API_BASE}/x/player/wbi/playurl"
+_VIDEO_LIKE_URL = f"{API_BASE}/x/web-interface/archive/like"
+_COMMENT_ACTION_URL = f"{API_BASE}/x/v2/reply/action"
+
+LIVE_API_BASE = "https://api.live.bilibili.com"
+_LIVE_ROOM_INFO_URL = f"{LIVE_API_BASE}/xlive/web-room/v1/index/getInfoByRoom"
+_LIVE_DANMU_INFO_URL = f"{LIVE_API_BASE}/xlive/web-room/v1/index/getDanmuInfo"
+_LIVE_SEND_DANMAKU_URL = f"{LIVE_API_BASE}/msg/send"
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -333,6 +340,41 @@ class BilibiliClient:
         self._logger.info(f"B站评论回复成功: oid={oid} root={root} parent={parent} rpid={rpid}")
         return True
 
+    def post_video_comment(
+        self, identifier: str, text: str, *, root: int = 0, parent: int = 0
+    ) -> bool:
+        """给视频发评论/回复：identifier 支持 BV/av/URL，root/parent 为 0 时发顶级评论。"""
+        message = (text or "").strip()
+        if not message:
+            self._logger.warning("B站视频评论参数不完整（text 不能为空）")
+            return False
+        aid = self._resolve_video_aid(identifier)
+        if not aid:
+            self._logger.warning(f"B站视频评论失败：无法解析视频号 {identifier!r}")
+            return False
+        return self.send_comment_reply(aid, root, parent, message, type_=1)
+
+    def like_comment(self, oid: int, rpid: int, type_: int = 1) -> bool:
+        """点赞评论。oid=稿件/动态 ID，rpid=评论 ID，type_=评论区类型（视频为 1）。"""
+        if not oid or not rpid:
+            self._logger.warning("B站评论点赞参数不完整（oid/rpid 不能为空）")
+            return False
+        form: dict[str, Any] = {
+            "oid": int(oid),
+            "rpid": int(rpid),
+            "action": 1,
+            "type": int(type_),
+            "csrf": self._bili_jct,
+        }
+        self._rate_limit_wait()
+        try:
+            self._fetch("POST", _COMMENT_ACTION_URL, data=form)
+        except BilibiliError as exc:
+            self._on_write_error("评论点赞", exc)
+            return False
+        self._logger.info(f"B站评论点赞成功: oid={oid} rpid={rpid}")
+        return True
+
     # ── 搜索 / 视频 / 用户空间 ──
 
     def search(
@@ -384,6 +426,97 @@ class BilibiliClient:
             return {}
         data = payload.get("data")
         return data if isinstance(data, dict) else {}
+
+    def like_video(self, identifier: str) -> bool:
+        """给视频点赞：identifier 支持 BV/av/URL（BV 会先查 aid）。"""
+        aid = self._resolve_video_aid(identifier)
+        if not aid:
+            self._logger.warning(f"B站视频点赞失败：无法解析视频号 {identifier!r}")
+            return False
+        form: dict[str, Any] = {"aid": aid, "like": 1, "csrf": self._bili_jct}
+        self._rate_limit_wait()
+        try:
+            self._fetch("POST", _VIDEO_LIKE_URL, data=form)
+        except BilibiliError as exc:
+            self._on_write_error("视频点赞", exc)
+            return False
+        self._logger.info(f"B站视频点赞成功: aid={aid}")
+        return True
+
+    # ── 直播 ──
+
+    def get_live_room_info(self, room_id: int) -> dict[str, Any]:
+        """直播间信息（getInfoByRoom 的 data：room_info/anchor_info 等）；失败返回空 dict。"""
+        room_id = _to_int(room_id)
+        if room_id <= 0:
+            return {}
+        try:
+            payload = self._fetch(
+                "GET", _LIVE_ROOM_INFO_URL, params={"room_id": room_id}
+            )
+        except BilibiliError as exc:
+            self._log_read_error("直播间信息读取", exc)
+            return {}
+        data = payload.get("data")
+        return data if isinstance(data, dict) else {}
+
+    def get_live_danmu_info(self, room_id: int) -> dict[str, Any]:
+        """弹幕服务器信息（getDanmuInfo 的 data：token/host_list）；失败返回空 dict。"""
+        real_room_id = self._resolve_live_room_id(room_id)
+        if real_room_id <= 0:
+            return {}
+        try:
+            payload = self._fetch(
+                "GET",
+                _LIVE_DANMU_INFO_URL,
+                params={"id": real_room_id, "type": 0},
+                headers={"Referer": f"https://live.bilibili.com/{real_room_id}"},
+            )
+        except BilibiliError as exc:
+            self._log_read_error("直播弹幕服务器信息读取", exc)
+            return {}
+        data = payload.get("data")
+        return data if isinstance(data, dict) else {}
+
+    def send_danmaku(self, room_id: int, text: str) -> bool:
+        """发送直播弹幕；未登录/参数不完整/接口失败返回 False。"""
+        room_id = _to_int(room_id)
+        message = (text or "").strip()
+        if room_id <= 0 or not message:
+            self._logger.warning("B站直播弹幕参数不完整（room_id/text 不能为空）")
+            return False
+        if not self._sessdata or not self._bili_jct:
+            self._logger.warning("B站直播弹幕发送失败：未登录")
+            return False
+        real_room_id = self._resolve_live_room_id(room_id)
+        form: dict[str, Any] = {
+            "roomid": real_room_id,
+            "msg": message,
+            "color": 16777215,
+            "mode": 1,
+            "fontsize": 25,
+            "rnd": int(time.time()),
+            "csrf": self._bili_jct,
+            "csrf_token": self._bili_jct,
+        }
+        self._rate_limit_wait()
+        try:
+            self._fetch(
+                "POST",
+                _LIVE_SEND_DANMAKU_URL,
+                data=form,
+                headers={
+                    "Referer": f"https://live.bilibili.com/{real_room_id}",
+                    "Origin": "https://live.bilibili.com",
+                },
+            )
+        except BilibiliError as exc:
+            self._on_write_error("直播弹幕发送", exc)
+            return False
+        self._logger.info(f"B站直播弹幕已发送: room={real_room_id}")
+        return True
+
+    # ── 用户空间 ──
 
     def get_space_info(self, mid: int) -> dict[str, Any]:
         """用户空间信息（space/wbi/acc/info 的 data）；失败返回空 dict。"""
@@ -760,6 +893,26 @@ class BilibiliClient:
             (query + self._wbi_mixin_key).encode()
         ).hexdigest()
         return signed
+
+    # ── 内部：ID 解析 ──
+
+    def _resolve_video_aid(self, identifier: str) -> int:
+        """BV/av/URL -> aid；BV 需要查一次 view 接口，解析失败返回 0。"""
+        bvid, aid = parse_video_id(identifier)
+        if aid:
+            return aid
+        if not bvid:
+            return 0
+        return _to_int(self.get_video_info(bvid).get("aid"))
+
+    def _resolve_live_room_id(self, room_id: int) -> int:
+        """短号/房间号 -> 真实房间号；查不到时原样返回输入值。"""
+        room_id = _to_int(room_id)
+        if room_id <= 0:
+            return 0
+        room = self.get_live_room_info(room_id).get("room_info")
+        real_room_id = _to_int(room.get("room_id")) if isinstance(room, dict) else 0
+        return real_room_id or room_id
 
     # ── 内部：HTTP / 错误处理 ──
 

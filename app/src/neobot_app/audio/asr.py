@@ -5,7 +5,7 @@
 打断调用方，也不该把底层异常细节（URL、Key、堆栈）泄露到提示词里。
 
 链路：任意音视频 -> ffmpeg 转 16k 单声道 mp3（上传体积可控）-> multipart POST
--> 取 JSON 的 text 字段。
+-> 取 JSON 的 text 字段。本机没有 ffmpeg 时先尝试 :mod:`.ffmpeg_install` 自动安装。
 """
 
 from __future__ import annotations
@@ -15,14 +15,19 @@ import json
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import httpx
 from neobot_contracts.ports.logging import Logger, NullLogger
 
+from neobot_app.audio.ffmpeg_install import FFmpegTools, ensure_ffmpeg
 from neobot_app.config.schemas.bot import ASR as ASRConfig
 from neobot_app.config.schemas.env import EnvConfig
+
+#: 注入点：测试传一个不联网的 resolver，生产走 ensure_ffmpeg。
+FFmpegResolver = Callable[[], Awaitable[FFmpegTools | None]]
 
 #: 供应商限制：单次音频不超过 1 小时、50 MB（大小上限由配置 max_audio_mb 覆盖）。
 MAX_AUDIO_SECONDS = 3600
@@ -42,9 +47,11 @@ class ASRService:
         *,
         logger: Logger | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        ffmpeg_resolver: FFmpegResolver | None = None,
     ) -> None:
         self._config = config
         self._logger = logger or NullLogger()
+        self._ffmpeg_resolver = ffmpeg_resolver or self._default_ffmpeg_resolver
         self._base_url = self._resolve_base_url(config)
         self._api_key = self._resolve_api_key(config)
         self._enabled = bool(config.enabled) and bool(self._base_url) and bool(self._api_key)
@@ -143,8 +150,19 @@ class ASRService:
         if duration is not None and duration > MAX_AUDIO_SECONDS:
             return f"{_ERROR_PREFIX}音频超过 {MAX_AUDIO_SECONDS // 60} 分钟上限"
         ffmpeg = shutil.which("ffmpeg")
+        ffprobe = shutil.which("ffprobe")
+        if ffmpeg is None or ffprobe is None:
+            tools = await self._ffmpeg_resolver()
+            if tools is not None:
+                ffmpeg = ffmpeg or str(tools.ffmpeg)
+                ffprobe = ffprobe or (str(tools.ffprobe) if tools.ffprobe else None)
+                # 下载装好的 ffprobe 不在 PATH 里：补一次时长探测，超长仍按上限拒绝。
+                if duration is None and ffprobe is not None:
+                    duration = await _run_ffprobe(ffprobe, source)
+                    if duration is not None and duration > MAX_AUDIO_SECONDS:
+                        return f"{_ERROR_PREFIX}音频超过 {MAX_AUDIO_SECONDS // 60} 分钟上限"
         if ffmpeg is None:
-            return f"{_ERROR_PREFIX}未找到 ffmpeg（请安装后加入 PATH）"
+            return f"{_ERROR_PREFIX}未找到 ffmpeg，自动安装也失败（请安装后加入 PATH）"
         output = out_dir / "audio.mp3"
         # -t 兜底：探测不到时长（流式/损坏容器）时也只会截前 1 小时再上传。
         command = [
@@ -173,17 +191,10 @@ class ASRService:
         ffprobe = shutil.which("ffprobe")
         if ffprobe is None:
             return None
-        command = [
-            ffprobe, "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=nw=1:nk=1", str(source),
-        ]
-        try:
-            completed = await asyncio.to_thread(
-                subprocess.run, command, capture_output=True, timeout=30
-            )
-            return float(completed.stdout.decode().strip())
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            return None
+        return await _run_ffprobe(ffprobe, source)
+
+    async def _default_ffmpeg_resolver(self) -> FFmpegTools | None:
+        return await ensure_ffmpeg(logger=self._logger)
 
     # ── 配置 ──
 
@@ -200,6 +211,21 @@ class ASRService:
         if not api_key:
             api_key = EnvConfig.get_api_platform_key("SiliconFlow") or ""
         return api_key
+
+
+async def _run_ffprobe(ffprobe: str, source: Path) -> float | None:
+    """执行 ffprobe 取时长；任何失败都返回 None（时长探测只是可选的提前拒绝）。"""
+    command = [
+        ffprobe, "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=nw=1:nk=1", str(source),
+    ]
+    try:
+        completed = await asyncio.to_thread(
+            subprocess.run, command, capture_output=True, timeout=30
+        )
+        return float(completed.stdout.decode().strip())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
 
 
 def build_asr_service(config: Any, *, logger: Logger | None = None) -> ASRService:
