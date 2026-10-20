@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import json
+
 from types import SimpleNamespace
 
 import pytest
@@ -138,11 +140,13 @@ async def test_headline_symptom_is_stripped_with_production_names() -> None:
     )
 
     assert _wire(adapter) == [["要抱抱"]]
-    assistant = [
-        m["content"]
-        for m in build_role_messages(queue, GROUP, bot_account=BOT_QQ)
-        if m["role"] == "assistant"
-    ]
+    assistant = []
+    for message in build_role_messages(queue, GROUP, bot_account=BOT_QQ):
+        if message.get("role") != "assistant":
+            continue
+        calls = message.get("tool_calls") or []
+        arguments = calls[0].get("function", {}).get("arguments", "{}") if calls else "{}"
+        assistant.append(str(json.loads(arguments).get("text") or message.get("content") or ""))
     assert assistant[-1] == "要抱抱"
 
 
@@ -240,9 +244,11 @@ async def test_history_matches_what_was_actually_sent() -> None:
         sender_names=[NAME],
     )
     assert _wire(adapter) == [["在的"]]
-    assistant = [
-        m["content"]
-        for m in build_role_messages(queue, GROUP, bot_account=BOT_QQ)
-        if m["role"] == "assistant"
-    ]
+    assistant = []
+    for message in build_role_messages(queue, GROUP, bot_account=BOT_QQ):
+        if message.get("role") != "assistant":
+            continue
+        calls = message.get("tool_calls") or []
+        arguments = calls[0].get("function", {}).get("arguments", "{}") if calls else "{}"
+        assistant.append(str(json.loads(arguments).get("text") or message.get("content") or ""))
     assert assistant == ["在的"]
