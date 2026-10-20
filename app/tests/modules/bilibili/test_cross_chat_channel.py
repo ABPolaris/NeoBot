@@ -15,7 +15,7 @@ class FakeEngine:
         self.available = available
         self.calls: list[tuple[str, str]] = []
 
-    async def generate_task_reply(self, task, *, history=""):
+    async def generate_task_reply(self, task, *, history="", live=False):
         self.calls.append((task, history))
         return self.reply
 
