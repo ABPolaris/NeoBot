@@ -7,7 +7,7 @@ covers:
   - app/src/neobot_app/builtin_plugins/dashboard/scheduled_admin.py
   - app/src/neobot_app/builtin_plugins/dashboard/model_probe.py
 verified_against: 93d0141
-verified_hash: a2d80da565e0
+verified_hash: b4df1cc931cb
 ---
 
 # 09b 面板接口面：api.py 的端点分组 · 权限级别 · 错误码语义

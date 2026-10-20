@@ -9,7 +9,7 @@ covers:
   - packages/chat/src/neobot_chat/providers/
   - packages/chat/src/neobot_chat/schema/exceptions.py
 verified_against: 5d6c775
-verified_hash: 0427690437b2
+verified_hash: a5d60df6b7f6
 ---
 
 # 05 模型路由与降级：角色/编号路由 · 原生视觉回退 · 计费与统计
