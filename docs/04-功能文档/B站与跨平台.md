@@ -60,7 +60,7 @@
 | /直播发言 <房间号|链接> <文本> | 次级管理员 | 用当前登录B站账号手动发一条弹幕 |
 
 - 使用当前 B站登录态（/login bilibili 的 cookie）；未登录时只能记录房间，发弹幕/自动回复不可用。
-- 自动回复：和群聊共用 WillingService 意愿判断（被 @/叫名字按 at_mention_guaranteed_reply 必回，其余按概率/问句/系数）；排除自己、同房间 20s 冷却 + 每分钟最多 3 条、回复截断 40 字符。无 willing 服务时退回旧的 live_interaction_at_only @过滤。
+- 自动回复：和群聊共用 WillingService 意愿判断（被 @/叫名字按 at_mention_guaranteed_reply 必回，其余按概率/问句/系数）；排除自己、同房间 20s 冷却 + 每分钟最多 3 条、回复截断 20 字符。无 willing 服务时退回旧的 live_interaction_at_only @过滤。
 - 状态文件：data/bilibili/live_interact.json，重启自动恢复。
 - 直播监听（开播/下播通知）在 streaming_parser 插件里，和这里完全分开。
 
