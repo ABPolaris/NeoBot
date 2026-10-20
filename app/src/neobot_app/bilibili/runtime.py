@@ -47,6 +47,7 @@ class BilibiliRuntime:
         uow_factory: Any,
         command_service: Any,
         asr_service: Any = None,
+        vision_provider: Any = None,
         logger: Logger | None = None,
         bot_name: str = "",
         bot_data: str = "",
@@ -99,6 +100,8 @@ class BilibiliRuntime:
                 getattr(cfg, "live_interaction_max_reply_chars", 40) or 40
             ),
             at_only=bool(getattr(cfg, "live_interaction_at_only", True)),
+            asr_service=asr_service,
+            vision_provider=vision_provider,
         )
         self.channel = BilibiliCrossChatChannel(
             self.service, self.engine, live_interactor=self.live_interactor

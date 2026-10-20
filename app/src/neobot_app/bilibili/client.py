@@ -20,7 +20,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode
 
 import requests
 
@@ -49,6 +49,7 @@ _COMMENT_ACTION_URL = f"{API_BASE}/x/v2/reply/action"
 
 LIVE_API_BASE = "https://api.live.bilibili.com"
 _LIVE_ROOM_INFO_URL = f"{LIVE_API_BASE}/xlive/web-room/v1/index/getInfoByRoom"
+_LIVE_PLAY_INFO_URL = f"{LIVE_API_BASE}/xlive/web-room/v2/index/getRoomPlayInfo"
 _LIVE_DANMU_INFO_URL = f"{LIVE_API_BASE}/xlive/web-room/v1/index/getDanmuInfo"
 _LIVE_SEND_DANMAKU_URL = f"{LIVE_API_BASE}/msg/send"
 
@@ -92,6 +93,35 @@ def parse_video_id(identifier: str) -> tuple[str, int]:
     if match:
         return "", int(match.group(1))
     return "", 0
+
+
+def _live_stream_url(codec: Mapping[str, Any]) -> tuple[str, int]:
+    """用 host+base_url+extra 拼直播拉流地址，并推算剩余有效秒数；字段缺失返回 ("", 0)。"""
+    url_info = codec.get("url_info")
+    info = (
+        url_info[0]
+        if isinstance(url_info, list) and url_info and isinstance(url_info[0], dict)
+        else {}
+    )
+    host = str(codec.get("host") or info.get("host") or "").strip()
+    base_url = str(codec.get("base_url") or codec.get("baseUrl") or "")
+    extra = str(codec.get("extra") or info.get("extra") or "")
+    if not host or not base_url:
+        return "", 0
+    if base_url.endswith("?") and extra.startswith("?"):
+        extra = extra[1:]
+    expires = _to_int(
+        codec.get("ttl")
+        or codec.get("stream_ttl")
+        or info.get("ttl")
+        or info.get("stream_ttl")
+    )
+    if expires <= 0 and extra:
+        # 实测 stream_ttl 常为 0，地址有效期在 extra 的 expires/deadline 绝对时间戳里。
+        query = parse_qs(extra.lstrip("?"))
+        epoch = _to_int((query.get("expires") or query.get("deadline") or [0])[0])
+        expires = max(epoch - int(time.time()), 0) if epoch > 0 else 0
+    return f"{host}{base_url}{extra}", expires
 
 
 @dataclass
@@ -486,6 +516,72 @@ class BilibiliClient:
             return {}
         data = payload.get("data")
         return data if isinstance(data, dict) else {}
+
+    def get_live_playurl(self, room_id: int) -> dict[str, Any]:
+        """直播拉流地址：优先 http_stream/flv/avc，其次 http_hls/fmp4/avc。
+
+        返回 {ok, room_id, url, format, expires, error}；取不到返回空 dict。
+        expires 是地址剩余有效秒数；FLV CDN 需要 UA/Referer/Origin（ffmpeg 拉流时带上）。
+        """
+        room_id = _to_int(room_id)
+        if room_id <= 0:
+            return {}
+        real_room_id = self._resolve_live_room_id(room_id)
+        if real_room_id <= 0:
+            return {}
+        params = {
+            "room_id": real_room_id,
+            "protocol": "0,1",
+            "format": "0,1,2",
+            "codec": "0,1",
+            "qn": 150,
+            "platform": "web",
+            "ptype": 8,
+        }
+        try:
+            payload = self._fetch(
+                "GET",
+                _LIVE_PLAY_INFO_URL,
+                params=params,
+                headers={
+                    "Referer": f"https://live.bilibili.com/{real_room_id}",
+                    "Origin": "https://live.bilibili.com",
+                },
+            )
+        except BilibiliError as exc:
+            self._log_read_error("直播拉流地址读取", exc)
+            return {}
+        data = payload.get("data")
+        playurl_info = data.get("playurl_info") if isinstance(data, dict) else None
+        playurl = (
+            playurl_info.get("playurl") if isinstance(playurl_info, dict) else None
+        )
+        streams = playurl.get("stream") if isinstance(playurl, dict) else None
+        for protocol, format_name, codec_name in (
+            ("http_stream", "flv", "avc"),
+            ("http_hls", "fmp4", "avc"),
+        ):
+            for stream in streams or []:
+                if not isinstance(stream, dict) or stream.get("protocol_name") != protocol:
+                    continue
+                for fmt in stream.get("format") or []:
+                    if not isinstance(fmt, dict) or fmt.get("format_name") != format_name:
+                        continue
+                    for codec in fmt.get("codec") or []:
+                        if not isinstance(codec, dict) or codec.get("codec_name") != codec_name:
+                            continue
+                        url, expires = _live_stream_url(codec)
+                        if not url:
+                            continue
+                        return {
+                            "ok": True,
+                            "room_id": _to_int(data.get("room_id")) or real_room_id,
+                            "url": url,
+                            "format": format_name,
+                            "expires": expires,
+                            "error": "",
+                        }
+        return {}
 
     def get_live_danmu_info(self, room_id: int) -> dict[str, Any]:
         """弹幕服务器信息（getDanmuInfo 的 data：token/host_list）；失败返回空 dict。"""
