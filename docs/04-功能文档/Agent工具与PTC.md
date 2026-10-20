@@ -153,6 +153,17 @@ language_id = "python"
 
 本功能不引入 Cordis 动态自修改、实验 Agent Teams，也不替换现有图片发送、文件下载、定时提醒及长期文件索引。
 
+## 敏感工具统一审查
+
+除 OneBot 通用动作外，沙箱/宿主执行（agent_execute）、共享目录写（agent_shared_write）、计划/目标/Ralph、群管理（kick/quit_group）和回复意愿管理也默认先走 AI 自动审查（agent.tools.auto_review=true）：
+
+- 审查通过：直接执行，不再要求凭据。
+- 审查拒绝：返回 AUTO_REVIEW_DENIED（工具层）或中文错误，并提示 credential__request 管理员凭据覆盖。
+- 审查不可用/超时：回退旧凭据门控。
+- agent.tools.auto_review=false：完全回到旧的凭据签发流程。
+
+管理员凭据仍然是最终人工覆盖：签发后重试会先消费凭据、跳过审查。
+
 ## OneBot 通用动作自动审查
 
 onebot__call 的 yellow/red 动作默认走一次 AI 自动审查（agent.onebot.auto_review=true）：
