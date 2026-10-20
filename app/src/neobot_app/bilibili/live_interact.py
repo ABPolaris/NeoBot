@@ -41,7 +41,13 @@ from neobot_app.bilibili.live_protocol import (
     parse_danmu_message,
     parse_events,
 )
-from neobot_app.bilibili.reply_engine import clean_reply
+from neobot_app.bilibili.prompts import (
+    MAX_LIVE_DANMAKU_CHARS,
+    LiveDanmakuContext,
+    build_live_danmaku_prompt,
+    build_live_scheduled_prompt,
+)
+from neobot_app.bilibili.tool_reply import run_tool_reply
 from neobot_app.core import DATA_DIR
 from neobot_app.utils.atomic import atomic_write_text
 from neobot_app.utils.logger import get_module_logger
@@ -83,26 +89,33 @@ class BilibiliLiveInteractor:
         *,
         provider: Any = None,
         bot_name: str = "",
+        bot_data: str = "",
         data_dir: Path | None = None,
         logger: Logger | None = None,
         cooldown_seconds: float = 20.0,
-        max_reply_chars: int = 40,
+        max_reply_chars: int = MAX_LIVE_DANMAKU_CHARS,
         at_only: bool = True,
         asr_service: Any = None,
         vision_provider: Any = None,
         media_service: Any = None,
         on_event: Callable[[LiveEvent], Any] | None = None,
         willing_service: Any = None,
+        flow_registry: Any = None,
+        mention_names: Any = None,
+        reply_chance: float = 0.5,
     ) -> None:
         # service 可以是 BilibiliService 或 BilibiliClient；每轮用 resolve_client 取当前 client。
         self._service = service
         self._provider = provider
         self._bot_name = str(bot_name or "").strip().lstrip("@")
+        self._bot_data = str(bot_data or "").strip()
         base_dir = Path(data_dir) if data_dir is not None else DATA_DIR
         self._path = base_dir / "bilibili" / "live_interact.json"
         self._logger = logger or _LOGGER
         self._cooldown = max(0.0, float(cooldown_seconds or 0.0))
-        self._max_reply_chars = max(0, int(max_reply_chars or 0))
+        self._max_reply_chars = min(
+            MAX_LIVE_DANMAKU_CHARS, max(1, int(max_reply_chars or MAX_LIVE_DANMAKU_CHARS))
+        )
         self._at_only = bool(at_only)
         self._asr_service = asr_service
         self._vision_provider = vision_provider
@@ -129,6 +142,11 @@ class BilibiliLiveInteractor:
         self._event_tasks: set[asyncio.Task[None]] = set()
         self._on_event = on_event
         self._willing_service = willing_service
+        self._flow_registry = flow_registry
+        self._mention_names = tuple(
+            str(name).strip() for name in (mention_names or ()) if str(name).strip()
+        )
+        self._reply_chance = max(0.0, min(1.0, float(reply_chance or 0.5)))
         self._live_cache: dict[str, tuple[float, bool]] = {}
         self._schedule_task: asyncio.Task[None] | None = None
         self._loaded = False
@@ -266,6 +284,8 @@ class BilibiliLiveInteractor:
         message = str(text or "").strip()
         if rid <= 0 or not message:
             return {"ok": False, "error": "房间号或弹幕内容不能为空"}
+        if len(message) > MAX_LIVE_DANMAKU_CHARS:
+            return {"ok": False, "error": f"弹幕超过 {MAX_LIVE_DANMAKU_CHARS} 字，已拦截"}
         client = self._get_client()
         if client is None:
             return {"ok": False, "error": "B站未登录或客户端不可用"}
@@ -683,7 +703,9 @@ class BilibiliLiveInteractor:
             return
         if not await self.is_live(_to_int(room_id)):
             return
-        reply = await self._generate_reply(text, _to_int(room_id))
+        reply = await self._generate_reply(
+            text, _to_int(room_id), str(danmu.get("name") or "")
+        )
         if not reply:
             return
         if not await self._post_danmaku(client, _to_int(room_id), reply, action="自动回复"):
@@ -719,7 +741,25 @@ class BilibiliLiveInteractor:
             return False
         if not sent:
             self._logger.warning(f"B站直播{action}发送失败", room_id=room_id)
-        return bool(sent)
+            return False
+        self._record_history(
+            str(room_id), {"uid": 0, "name": self._bot_name or "你", "text": text}
+        )
+        return True
+
+    def _known_bot_names(self) -> tuple[str, ...]:
+        """QQ 昵称 + B站账号昵称；后者用于识别 B站弹幕里的 @。"""
+        names = [self._bot_name, *self._mention_names]
+        service = self._service
+        status = getattr(service, "status", None)
+        if callable(status):
+            try:
+                uname = str((status() or {}).get("uname") or "").strip()
+                if uname:
+                    names.append(uname)
+            except Exception:
+                pass
+        return tuple(name for name in names if name)
 
     def _should_reply(self, room_id: str, danmu: dict[str, Any], text: str) -> bool:
         """群聊式意愿判断；无 willing_service 时退回旧的 @ 过滤。"""
@@ -739,15 +779,24 @@ class BilibiliLiveInteractor:
                 name=str(danmu.get("name") or ""),
                 text=text,
                 observed_messages=observed,
+                extra_bot_names=self._known_bot_names(),
+                base_probability=self._reply_chance,
             )
         except Exception as exc:
             self._logger.warning(
-                "直播弹幕意愿判断失败，按不回复处理",
+                "直播弹幕意愿判断失败，回退 @ 过滤",
                 room_id=room_id,
                 error=f"{type(exc).__name__}: {exc}",
             )
-            return False
-        if not decision.should_reply:
+            return (not self._at_only) or self._mentions_bot(text)
+        if decision.should_reply:
+            self._logger.info(
+                "直播弹幕意愿通过",
+                room_id=room_id,
+                probability=getattr(decision, "probability", 0.0),
+                reasons=getattr(decision, "reasons", ()),
+            )
+        else:
             self._logger.debug(
                 "直播弹幕意愿判断：不回复",
                 room_id=room_id,
@@ -757,9 +806,8 @@ class BilibiliLiveInteractor:
         return bool(decision.should_reply)
 
     def _mentions_bot(self, text: str) -> bool:
-        if not self._bot_name:
-            return False
-        return self._bot_name.lower() in text.lower()
+        lowered = text.lower()
+        return any(name.lower() in lowered for name in self._known_bot_names())
 
     def _reply_allowed(self, room_id: str) -> bool:
         now = time.monotonic()
@@ -776,46 +824,93 @@ class BilibiliLiveInteractor:
         self._reply_times[room_id].append(now)
         self._last_reply_at[room_id] = now
 
-    async def _generate_reply(self, text: str, room_id: int) -> str:
-        system = (
-            f"你在B站直播间以「{self._bot_name or '主播助手'}」的身份回一条直播弹幕。"
-            "要求：B站直播弹幕，极短（不超过一句话）、口语化、像真人随口接话，不刷屏；"
-            "不要复述观众原话，不要发链接，不要使用 markdown。"
-            "如果给了直播画面描述，可以参考画面自然接话，但不要生硬播报画面。"
+    def _record_live_flow(self, room_id: int, system: str, messages: list[dict]) -> None:
+        registry = self._flow_registry
+        if registry is None:
+            return
+        try:
+            key = f"bilibili_live:{room_id}"
+            model = str(getattr(self._provider, "model", "") or "")
+            registry.record_prompt(
+                key,
+                system_prompt=system,
+                model=model,
+                conversation_kind="bilibili_live",
+                conversation_id=str(room_id),
+            )
+            registry.record_request(key, messages=messages, model=model, iteration=1)
+        except Exception:
+            pass
+
+    async def _generate_reply(self, text: str, room_id: int, user_name: str = "") -> str:
+        room = self._rooms.get(str(room_id)) or {}
+        ctx = LiveDanmakuContext(
+            bot_name=self._bot_name,
+            bot_data=self._bot_data,
+            room_name=str(room.get("name") or ""),
+            viewer_name=user_name,
+            text=text,
+            recent_history=self.format_history(room_id, 12),
+            frame_context=await self.frame_context(room_id),
         )
-        frame = await self.frame_context(room_id)
-        content = text
-        if frame:
-            content += f"\n[当前直播画面]\n{frame}"
+        system, content = build_live_danmaku_prompt(ctx)
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": content},
         ]
-        return clean_reply(
-            await self._chat(messages, error_label="B站直播回复生成失败"),
-            self._max_reply_chars,
-        )
+        self._record_live_flow(room_id, system, messages)
+        try:
+            result = await run_tool_reply(
+                self._provider,
+                system,
+                content,
+                max_chars=self._max_reply_chars,
+                timeout=90.0,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._logger.warning(
+                "B站直播回复生成失败",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return ""
+        return result.text or ""
 
     async def _generate_schedule_danmaku(self, prompt: str, context: str, room_id: int) -> str:
-        system = (
-            f"你在B站直播间以「{self._bot_name or '主播助手'}」的身份主动发一条直播弹幕。"
-            "要求：B站直播弹幕，短（一句话以内）、口语化、像真人随口说的，不刷屏；"
-            "不要发链接，不要使用 markdown，不要解释你在执行任务。"
+        room = self._rooms.get(str(room_id)) or {}
+        ctx = LiveDanmakuContext(
+            bot_name=self._bot_name,
+            bot_data=self._bot_data,
+            room_name=str(room.get("name") or ""),
+            text=prompt,
+            recent_history=context or self.format_history(room_id, 12),
+            frame_context=await self.frame_context(room_id),
+            scheduled_prompt=prompt,
         )
-        content = f"这条弹幕要说的事：{prompt}"
-        if context:
-            content += f"\n最近的直播间弹幕：\n{context}"
-        frame = await self.frame_context(room_id)
-        if frame:
-            content += f"\n[当前直播画面]\n{frame}"
+        system, content = build_live_scheduled_prompt(ctx)
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": content},
         ]
-        return clean_reply(
-            await self._chat(messages, error_label="B站直播定时弹幕生成失败"),
-            self._max_reply_chars,
-        )
+        self._record_live_flow(room_id, system, messages)
+        try:
+            result = await run_tool_reply(
+                self._provider,
+                system,
+                content,
+                max_chars=self._max_reply_chars,
+                timeout=90.0,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._logger.warning(
+                "B站直播定时弹幕生成失败",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return ""
+        return result.text or ""
 
     async def _chat(self, messages: list[dict[str, str]], *, error_label: str) -> str:
         if self._provider is None:
