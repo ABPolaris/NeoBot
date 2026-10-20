@@ -36,6 +36,7 @@ class BilibiliLiveSkill(SkillModule):
             "B站直播 Skill：先 status 查房间是否开播，再 send_danmaku / read_history。\n"
             "所有写操作（发弹幕、定时弹幕）都以当前登录的B站账号发言，且仅在该房间开播时生效；"
             "下播时返回「未开播，不互动」。enable/disable 控制房间监听与自动回复。"
+            "需要看画面用 snapshot，需要听一段直播说话用 transcribe（按需，非实时字幕）。"
         )
 
     def __init__(self, live_interactor: Any = None, service: Any = None) -> None:
@@ -71,7 +72,7 @@ class BilibiliLiveSkill(SkillModule):
                 {
                     "properties": {
                         "room_id": {"type": "integer", "description": "直播间短号或房间号"},
-                        "count": {"type": "integer", "description": "读取条数，默认 20", "default": 20},
+                        "count": {"type": "integer", "description": "读取条数，默认 500（最多 500）", "default": 500},
                     },
                     "required": ["room_id"],
                 },
@@ -139,6 +140,27 @@ class BilibiliLiveSkill(SkillModule):
                     "required": ["room_id", "schedule_id"],
                 },
             ),
+            self._tool_def(
+                "snapshot",
+                "按需获取直播间当前画面的一帧截图；仅开播时可用，返回本地文件路径与可选画面描述。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号"},
+                    },
+                    "required": ["room_id"],
+                },
+            ),
+            self._tool_def(
+                "transcribe",
+                "按需截取直播间一段音频并做 ASR 转写；仅开播时可用。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号"},
+                        "seconds": {"type": "integer", "description": "截取音频秒数，默认 15，建议 10-30", "default": 15},
+                    },
+                    "required": ["room_id"],
+                },
+            ),
         ]
 
     async def execute(self, tool_name: str, args: dict[str, Any]) -> str:
@@ -162,6 +184,10 @@ class BilibiliLiveSkill(SkillModule):
                 return self._list_schedules(live, args)
             if tool_name == "delete_schedule":
                 return await self._delete_schedule(live, args)
+            if tool_name == "snapshot":
+                return await self._snapshot(live, args)
+            if tool_name == "transcribe":
+                return await self._transcribe(live, args)
         except Exception as exc:
             return _json({"ok": False, "error": f"B站直播操作失败：{type(exc).__name__}: {exc}"})
         return _json({"ok": False, "error": f"未知工具: {tool_name}"})
@@ -216,11 +242,37 @@ class BilibiliLiveSkill(SkillModule):
         if rid <= 0:
             return _json({"ok": False, "error": "房间号无效"})
         try:
-            count = int(args.get("count") or 20)
+            count = int(args.get("count") or 500)
         except (TypeError, ValueError):
-            count = 20
+            count = 500
         items = live.get_history(rid, count)
-        return _json({"ok": True, "room_id": rid, "count": len(items), "history": items})
+        return _json(
+            {
+                "ok": True,
+                "room_id": rid,
+                "count": len(items),
+                "history": items,
+                "display": live.format_history(rid, count),
+            }
+        )
+
+    async def _snapshot(self, live: Any, args: dict[str, Any]) -> str:
+        rid = _room_id(args)
+        result = await live.snapshot(rid)
+        payload = dict(result)
+        payload["note"] = "画面文件保存在本机；描述由视觉模型生成，可能不准确"
+        return _json(payload)
+
+    async def _transcribe(self, live: Any, args: dict[str, Any]) -> str:
+        rid = _room_id(args)
+        try:
+            seconds = max(5, min(int(args.get("seconds") or 15), 60))
+        except (TypeError, ValueError):
+            seconds = 15
+        result = await live.transcribe(rid, seconds=seconds)
+        payload = dict(result)
+        payload["note"] = "按需截取直播音频转写，不是实时字幕"
+        return _json(payload)
 
     async def _enable(self, live: Any, args: dict[str, Any]) -> str:
         rid = _room_id(args)

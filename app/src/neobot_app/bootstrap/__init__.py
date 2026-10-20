@@ -1082,6 +1082,7 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
             uow_factory=uow_factory,
             command_service=command_service,
             asr_service=asr_service,
+            vision_provider=vision_provider,
             logger=logger_factory.get_logger("app.bilibili"),
             bot_name=config.bot.nick_name,
             bot_data=config.bot.bot_data,

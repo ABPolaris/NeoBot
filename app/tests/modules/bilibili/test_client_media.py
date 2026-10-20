@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -286,6 +287,128 @@ def test_download_file_streams_and_cleans_up_on_failure(tmp_path) -> None:
     assert _client(session).download_file("https://cdn/c.m4s", missing) is False
     assert missing.exists() is False
 
+
+
+# ── client：直播拉流地址 ──
+
+_LIVE_ROOM = {"code": 0, "data": {"room_info": {"room_id": 5050, "live_status": 1}}}
+_LIVE_EXPIRES_AT = int(time.time()) + 3600
+
+
+def _live_playurl_payload(*, flv: bool = True, hls: bool = True) -> dict[str, Any]:
+    streams: list[dict[str, Any]] = []
+    if flv:
+        streams.append(
+            {
+                "protocol_name": "http_stream",
+                "format": [
+                    {
+                        "format_name": "flv",
+                        "codec": [
+                            {
+                                "codec_name": "avc",
+                                "base_url": "/live-bvc/5050/live.flv?",
+                                "url_info": [
+                                    {
+                                        "host": "https://flv.bilivideo.com",
+                                        "extra": f"expires={_LIVE_EXPIRES_AT}&qn=150",
+                                        "stream_ttl": 0,
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    if hls:
+        streams.append(
+            {
+                "protocol_name": "http_hls",
+                "format": [
+                    {
+                        "format_name": "fmp4",
+                        "codec": [
+                            {
+                                "codec_name": "avc",
+                                "base_url": "/live-bvc/5050/live.m4s",
+                                "url_info": [
+                                    {
+                                        "host": "https://hls.bilivideo.com",
+                                        "extra": "?expires=9999999999",
+                                        "stream_ttl": 3598,
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    return {"code": 0, "data": {"room_id": 5050, "playurl_info": {"playurl": {"stream": streams}}}}
+
+
+def test_get_live_playurl_resolves_room_and_prefers_flv() -> None:
+    session = FakeSession([FakeResponse(_LIVE_ROOM), FakeResponse(_live_playurl_payload())])
+    result = _client(session).get_live_playurl(1234)
+    assert result["ok"] is True
+    assert result["room_id"] == 5050
+    assert result["format"] == "flv"
+    assert result["url"] == (
+        f"https://flv.bilivideo.com/live-bvc/5050/live.flv?expires={_LIVE_EXPIRES_AT}&qn=150"
+    )
+    assert 3500 < result["expires"] <= 3600
+    room_call, play_call = session.calls
+    assert room_call["url"].endswith("/xlive/web-room/v1/index/getInfoByRoom")
+    assert room_call["params"] == {"room_id": 1234}
+    assert play_call["url"].endswith("/xlive/web-room/v2/index/getRoomPlayInfo")
+    assert play_call["params"] == {
+        "room_id": 5050,
+        "protocol": "0,1",
+        "format": "0,1,2",
+        "codec": "0,1",
+        "qn": 150,
+        "platform": "web",
+        "ptype": 8,
+    }
+    assert play_call["headers"] == {
+        "Referer": "https://live.bilibili.com/5050",
+        "Origin": "https://live.bilibili.com",
+    }
+
+
+def test_get_live_playurl_falls_back_to_hls_fmp4() -> None:
+    session = FakeSession(
+        [FakeResponse(_LIVE_ROOM), FakeResponse(_live_playurl_payload(flv=False))]
+    )
+    result = _client(session).get_live_playurl(5050)
+    assert result["format"] == "fmp4"
+    assert result["url"] == "https://hls.bilivideo.com/live-bvc/5050/live.m4s?expires=9999999999"
+    assert result["expires"] == 3598
+
+
+def test_get_live_playurl_degrades() -> None:
+    assert _client(FakeSession()).get_live_playurl(0) == {}
+
+    denied = FakeSession(
+        [
+            FakeResponse({"code": -400, "message": "房间不存在"}),
+            FakeResponse({"code": -400, "message": "房间不存在"}),
+        ]
+    )
+    assert _client(denied).get_live_playurl(5050) == {}
+
+    offline = FakeSession(
+        [
+            FakeResponse(_LIVE_ROOM),
+            FakeResponse({"code": 0, "data": {"room_id": 5050, "playurl_info": None}}),
+        ]
+    )
+    assert _client(offline).get_live_playurl(5050) == {}
+
+    no_host = _live_playurl_payload(hls=False)
+    no_host["data"]["playurl_info"]["playurl"]["stream"][0]["format"][0]["codec"][0]["url_info"] = [{}]
+    assert _client(FakeSession([FakeResponse(_LIVE_ROOM), FakeResponse(no_host)])).get_live_playurl(5050) == {}
 
 # ── 视频理解服务 ──
 

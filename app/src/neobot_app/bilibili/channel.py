@@ -112,7 +112,15 @@ class BilibiliCrossChatChannel:
         if not live:
             return False, "", "未开播，不互动"
         history = await self.get_history(f"live:{room_id}", count=20)
-        reply = await self._engine.generate_task_reply(str(task or ""), history=history)
+        frame_context = ""
+        try:
+            frame_context = await self._live.frame_context(room_id)
+        except Exception as exc:
+            logger.debug("B站直播跨聊天画面读取失败", room_id=room_id, error=str(exc))
+        content = str(task or "")
+        if frame_context:
+            content += f"\n[当前直播画面]\n{frame_context}"
+        reply = await self._engine.generate_task_reply(content, history=history)
         if reply is None:
             return False, "", "B站侧决定不回应这个任务"
         result = await self._live.send_danmaku(room_id, reply)
@@ -156,6 +164,9 @@ class BilibiliCrossChatChannel:
         if self._live is None:
             return ""
         try:
+            formatter = getattr(self._live, "format_history", None)
+            if callable(formatter):
+                return str(formatter(room_id, limit) or "")
             items = self._live.get_history(room_id, limit)
         except Exception as exc:
             logger.warning(

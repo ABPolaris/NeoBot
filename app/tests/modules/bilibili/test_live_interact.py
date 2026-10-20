@@ -395,18 +395,18 @@ async def test_live_status_is_cached_for_60_seconds(tmp_path: Path) -> None:
 # ── 房间历史 ──
 
 
-async def test_history_keeps_latest_50_danmu(tmp_path: Path) -> None:
+async def test_history_keeps_latest_500_danmu(tmp_path: Path) -> None:
     interactor, _client, _provider = await _enabled(tmp_path, auto_reply=False)
-    for index in range(55):
+    for index in range(505):
         await interactor._handle_danmu("5440", {"uid": index, "name": f"观众{index}", "text": f"弹幕{index}"})
 
-    history = interactor.get_history(5440, 100)
-    assert len(history) == 50
+    history = interactor.get_history(5440)
+    assert len(history) == 500
     assert history[0]["text"] == "弹幕5"
-    assert history[-1]["text"] == "弹幕54"
-    assert set(history[0]) == {"uid", "name", "text", "time"}
+    assert history[-1]["text"] == "弹幕504"
+    assert set(history[0]) == {"uid", "name", "text", "time", "ts"}
     assert len(history[0]["time"]) == 8
-    assert interactor.get_history(5440, 2)[-1]["text"] == "弹幕54"
+    assert interactor.get_history(5440, 2)[-1]["text"] == "弹幕504"
     assert interactor.get_history(9999) == []
 
 
@@ -501,3 +501,42 @@ async def test_schedule_validation_and_delete(tmp_path: Path) -> None:
         "schedule_id": schedule_id,
     }
     assert interactor.list_schedules() == []
+
+
+class _FakeMedia:
+    def __init__(self) -> None:
+        self.captures: list[int] = []
+
+    async def capture_frame(self, room_id: int) -> dict:
+        self.captures.append(room_id)
+        return {"ok": True, "path": "frame.jpg", "bytes": b"", "room_id": room_id}
+
+
+class _FakeVision:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, messages: list[dict]) -> dict:
+        self.calls += 1
+        return {"content": "主播正在挥手"}
+
+
+async def test_reply_chain_captures_frame_context(tmp_path: Path) -> None:
+    provider = _FakeProvider("欢迎")
+    interactor, client, _ = await _enabled(
+        tmp_path, provider=provider, at_only=False
+    )
+    media = _FakeMedia()
+    vision = _FakeVision()
+    interactor._media = media
+    interactor._vision_provider = vision
+    interactor._describe_frame = lambda snapshot: _async_value("主播正在挥手")  # type: ignore[method-assign]
+
+    await interactor._handle_danmu("5440", {"uid": 9, "name": "观众", "text": "在吗"})
+    assert media.captures == [5440]
+    assert client.sent == [(5440, "欢迎")]
+    assert "主播正在挥手" in provider.messages[-1][-1]["content"]
+
+
+async def _async_value(value):
+    return value

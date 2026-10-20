@@ -8,7 +8,7 @@ provider 生成一句极短回复，再由 BilibiliClient.send_danmaku 发出。
 下播时 WSS 可以继续收弹幕（保留历史），但不生成、不发送。
 
 启用房间与定时弹幕持久化在 `<DATA_DIR>/bilibili/live_interact.json`；
-每个房间保留最近 50 条弹幕供 agent / 跨聊天读取。start() 恢复连接与定时循环。
+每个房间保留最近 500 条弹幕供 agent / 跨聊天读取（带时间标记）。start() 恢复连接与定时循环。
 不 import streaming_parser，也不依赖它的订阅/轮询。
 """
 
@@ -54,7 +54,7 @@ _REPLY_WINDOW_SECONDS = 60.0
 #: 房间开播状态缓存时长；避免每条弹幕都打一次直播间信息接口。
 _LIVE_STATUS_TTL_SECONDS = 60.0
 #: 每房间保留的最近弹幕条数。
-_MAX_HISTORY = 50
+_MAX_HISTORY = 500
 #: 定时弹幕检查间隔。
 _SCHEDULE_CHECK_SECONDS = 30.0
 _RECURRENCES = frozenset({"once", "daily", "weekly"})
@@ -125,6 +125,9 @@ class BilibiliLiveInteractor:
         cooldown_seconds: float = 20.0,
         max_reply_chars: int = 40,
         at_only: bool = True,
+        asr_service: Any = None,
+        vision_provider: Any = None,
+        media_service: Any = None,
     ) -> None:
         # service 可以是 BilibiliService 或 BilibiliClient；每轮用 resolve_client 取当前 client。
         self._service = service
@@ -136,6 +139,21 @@ class BilibiliLiveInteractor:
         self._cooldown = max(0.0, float(cooldown_seconds or 0.0))
         self._max_reply_chars = max(0, int(max_reply_chars or 0))
         self._at_only = bool(at_only)
+        self._asr_service = asr_service
+        self._vision_provider = vision_provider
+        self._media: Any = media_service
+        if self._media is None:
+            try:
+                from .live_media import LiveMediaService
+
+                self._media = LiveMediaService(
+                    self._service,
+                    asr_service=asr_service,
+                    logger=self._logger,
+                    data_dir=base_dir,
+                )
+            except Exception:
+                self._media = None
         self._rooms: dict[str, dict[str, Any]] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._reply_times: dict[str, deque[float]] = defaultdict(deque)
@@ -319,13 +337,114 @@ class BilibiliLiveInteractor:
         return live
 
     def get_history(self, room_id: int, count: int = _MAX_HISTORY) -> list[dict[str, Any]]:
-        """房间最近弹幕（旧→新），最多 50 条。"""
+        """房间最近弹幕（旧→新），默认最多 500 条。"""
         rid = _to_int(room_id)
         limit = max(1, min(_to_int(count) or _MAX_HISTORY, _MAX_HISTORY))
         items = self._history.get(str(rid))
         if not items:
             return []
         return [dict(item) for item in list(items)[-limit:]]
+
+    def format_history(self, room_id: int, count: int = _MAX_HISTORY) -> str:
+        """按群聊风格渲染弹幕：每行带时间，超过 5 分钟间隔插时间线。"""
+        items = self.get_history(room_id, count)
+        lines: list[str] = []
+        last_ts = 0.0
+        for item in items:
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            ts = float(item.get("ts") or 0.0)
+            clock = str(item.get("time") or "")
+            if ts and last_ts and ts - last_ts >= 300:
+                lines.append(f"--- {datetime.fromtimestamp(ts).strftime('%H:%M')} ---")
+            name = str(item.get("name") or "观众")
+            lines.append(f"[{clock}] {name}: {text}")
+            if ts:
+                last_ts = ts
+        return "\n".join(lines)
+
+    async def frame_context(self, room_id: int) -> str:
+        """抓当前直播画面并让视觉模型描述；失败返回空串，不阻断回复。"""
+        # 没有视觉模型时截图无人消费，跳过；按需 snapshot 仍可单独调用。
+        if self._vision_provider is None:
+            return ""
+        snapshot = await self.snapshot(room_id)
+        if not snapshot.get("ok"):
+            return ""
+        return str(snapshot.get("description") or "").strip()
+
+    async def snapshot(self, room_id: int) -> dict[str, Any]:
+        """按需抓一帧直播画面（返回 path/描述；仅开播时）。"""
+        rid = _to_int(room_id)
+        if rid <= 0:
+            return {"ok": False, "error": "房间号无效"}
+        if self._media is None:
+            return {"ok": False, "error": "直播媒体服务未配置"}
+        if not await self.is_live(rid):
+            return {"ok": False, "error": "未开播，不获取画面"}
+        try:
+            result = await call_client(self._media.capture_frame, rid)
+        except Exception as exc:
+            self._logger.warning("直播截帧失败", room_id=rid, error=f"{type(exc).__name__}: {exc}")
+            return {"ok": False, "error": f"截帧失败：{exc}"}
+        if not isinstance(result, dict) or not result.get("ok"):
+            return result if isinstance(result, dict) else {"ok": False, "error": "截帧失败"}
+        description = await self._describe_frame(result)
+        if description:
+            result["description"] = description
+        return result
+
+    async def transcribe(self, room_id: int, *, seconds: int = 15) -> dict[str, Any]:
+        """按需截取一段直播音频并转写（仅开播时）。"""
+        rid = _to_int(room_id)
+        if rid <= 0:
+            return {"ok": False, "error": "房间号无效"}
+        if self._media is None:
+            return {"ok": False, "error": "直播媒体服务未配置"}
+        if not await self.is_live(rid):
+            return {"ok": False, "error": "未开播，不转写"}
+        try:
+            return await call_client(self._media.transcribe, rid, seconds=seconds)
+        except Exception as exc:
+            self._logger.warning("直播 ASR 失败", room_id=rid, error=f"{type(exc).__name__}: {exc}")
+            return {"ok": False, "error": f"直播转写失败：{exc}"}
+
+    async def _describe_frame(self, snapshot: dict[str, Any]) -> str:
+        if self._vision_provider is None:
+            return ""
+        try:
+            raw = snapshot.get("bytes")
+            if not raw:
+                path = snapshot.get("path")
+                if not path:
+                    return ""
+                raw = await asyncio.to_thread(Path(path).read_bytes)
+            from neobot_app.image.parser import _build_vision_image_part
+
+            part = _build_vision_image_part(bytes(raw), logger=self._logger)
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "这是B站直播间的当前画面截图。用一两句话客观描述画面里发生了什么，供弹幕回复参考；不要编造看不清的细节。",
+                        },
+                        part,
+                    ],
+                }
+            ]
+            response = self._vision_provider.chat(messages)
+            if inspect.isawaitable(response):
+                response = await response
+            content = response.get("content", "") if isinstance(response, dict) else get_field(response, "content", "")
+            return str(content or "").strip()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._logger.debug("直播画面描述失败", error=f"{type(exc).__name__}: {exc}")
+            return ""
 
     # ── 定时弹幕 ──
 
@@ -516,7 +635,7 @@ class BilibiliLiveInteractor:
             return
         if not await self.is_live(_to_int(room_id)):
             return
-        reply = await self._generate_reply(text)
+        reply = await self._generate_reply(text, _to_int(room_id))
         if not reply:
             return
         if not await self._post_danmaku(client, _to_int(room_id), reply, action="自动回复"):
@@ -532,6 +651,7 @@ class BilibiliLiveInteractor:
             "uid": _to_int(danmu.get("uid")),
             "name": str(danmu.get("name") or ""),
             "text": text,
+            "ts": time.time(),
             "time": datetime.now().astimezone().strftime("%H:%M:%S"),
         }
         room_history = self._history.get(room_id)
@@ -573,22 +693,27 @@ class BilibiliLiveInteractor:
         self._reply_times[room_id].append(now)
         self._last_reply_at[room_id] = now
 
-    async def _generate_reply(self, text: str) -> str:
+    async def _generate_reply(self, text: str, room_id: int) -> str:
         system = (
             f"你在B站直播间以「{self._bot_name or '主播助手'}」的身份回一条直播弹幕。"
             "要求：B站直播弹幕，极短（不超过一句话）、口语化、像真人随口接话，不刷屏；"
             "不要复述观众原话，不要发链接，不要使用 markdown。"
+            "如果给了直播画面描述，可以参考画面自然接话，但不要生硬播报画面。"
         )
+        frame = await self.frame_context(room_id)
+        content = text
+        if frame:
+            content += f"\n[当前直播画面]\n{frame}"
         messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": text},
+            {"role": "user", "content": content},
         ]
         return clean_reply(
             await self._chat(messages, error_label="B站直播回复生成失败"),
             self._max_reply_chars,
         )
 
-    async def _generate_schedule_danmaku(self, prompt: str, context: str) -> str:
+    async def _generate_schedule_danmaku(self, prompt: str, context: str, room_id: int) -> str:
         system = (
             f"你在B站直播间以「{self._bot_name or '主播助手'}」的身份主动发一条直播弹幕。"
             "要求：B站直播弹幕，短（一句话以内）、口语化、像真人随口说的，不刷屏；"
@@ -597,6 +722,9 @@ class BilibiliLiveInteractor:
         content = f"这条弹幕要说的事：{prompt}"
         if context:
             content += f"\n最近的直播间弹幕：\n{context}"
+        frame = await self.frame_context(room_id)
+        if frame:
+            content += f"\n[当前直播画面]\n{frame}"
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": content},
@@ -671,7 +799,8 @@ class BilibiliLiveInteractor:
                     continue
                 text = await self._generate_schedule_danmaku(
                     str(schedule.get("prompt") or ""),
-                    self._format_history(rid, 10),
+                    self.format_history(rid, 50),
+                    rid,
                 )
                 if not text:
                     continue
@@ -695,13 +824,8 @@ class BilibiliLiveInteractor:
                 )
         return fired
 
-    def _format_history(self, room_id: int, count: int) -> str:
-        return "\n".join(
-            f"[{item.get('time')}] {item.get('name') or '观众'}:{item.get('text') or ''}"
-            for item in self.get_history(room_id, count)
-        )
-
-    # ── 内部：任务与持久化 ──
+    def _format_history(self, room_id: int, count: int = 50) -> str:
+        return self.format_history(room_id, count)
 
     def _get_client(self) -> Any | None:
         """取当前可用 client；BilibiliService 休眠时 resolve_client 会回退成 service 本身。"""
