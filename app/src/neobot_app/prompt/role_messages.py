@@ -2,18 +2,17 @@
 
 新提示词架构下,聊天记录不再内嵌在 system 提示词中,而是:
     - 普通用户消息 -> user 角色
-    - bot 自己发出的消息 -> assistant 角色(模型会将其视为自己的历史输出,
-      避免重复回答同一话题、同一话题前后观点不一致)
+    - bot 自己发出的消息 -> assistant 的 send_reply 工具调用 + 对应 tool 回执
+      (模型看到的是「用工具说话」的历史，避免模仿纯文本输出)
     - 时间戳/撤回/表情回应/戳一戳等非消息条目 -> 独立的 user 消息
 
 消息编号(numbering)与 system 提示词中的 <消息编号说明> 共用同一个实例,
 保证工具参数(如 reply_to)引用的编号一致;每条消息行首的 [msg_id=xxx]
 即真实 OneBot message_id,工具参数需要 message_id 时直接使用。
 
-**assistant 消息不带 `编号: 发送者:` 前缀**(根因修复,见 _render_role_message):
-把系统标注渲染进模型自己的历史发言,等于用例子教它「你就该这么说话」——
-模型于是续写聊天记录(`193: AAA大肥鱼: 我是一条鱼`),脏输出再写回历史形成正反馈。
-编号与发送者名字保留在 user 消息上(模型需要用它们指代**别人**)。
+**assistant 历史统一改写为 send_reply 工具调用**(见 _as_send_reply_tool_history):
+历史里 assistant 只带正文，等于用例子教模型不用工具也能说话；现在每条历史发言换成
+assistant.tool_calls(send_reply) + 同 id 的 tool 回执，正文仍在 arguments 里。
 
 **每条 user 消息带粗粒度年龄**(fix(14)):旧消息不再「永远不会过期」。年龄由
 occurred_at 相对**本次快照里最新一条消息**计算,不读墙钟——同一队列快照在任意
@@ -22,6 +21,7 @@ occurred_at 相对**本次快照里最新一条消息**计算,不读墙钟——
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from neobot_app.message.queue import QueueEntryType
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from neobot_app.message.numbering import MessageNumbering
 
 
-def _user_message(content: str) -> dict[str, str]:
+def _user_message(content: str) -> dict[str, Any]:
     return {"role": "user", "content": content}
 
 
@@ -73,10 +73,11 @@ def _render_role_message(
     content: str,
     replied: bool = False,
     age: str = "",
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """按角色渲染一条聊天记录。
 
     **assistant 角色不渲染 `编号: 发送者:` 前缀**（根因修复）。
+    assistant 正文随后由 _as_send_reply_tool_history 改写为 send_reply 工具调用。
 
     历史里 assistant 消息带着系统生成的标注，等于用例子教模型「你就该这么说话」：
     模型被告知这些是它自己说过的话，于是照抄格式去续写聊天记录（`193: AAA大肥鱼:
@@ -93,7 +94,7 @@ def _render_role_message(
         body = content
         if replied:
             body = f"[被回复消息] {content}"
-        return {"role": role, "content": body}
+        return {"role": role, "content": body, "_history_msg_id": msg_id}
     prefix = f"{number}: " if number is not None else ""
     marker = "[被回复消息] " if replied else ""
     age_label = f"[{age}] " if age else ""
@@ -101,6 +102,52 @@ def _render_role_message(
         "role": role,
         "content": f"[msg_id={msg_id}] {prefix}{marker}{age_label}{sender}: {content}",
     }
+
+
+def _as_send_reply_tool_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把历史 assistant 正文改成 send_reply 工具调用，避免模型模仿纯文本发言。
+
+    历史里 assistant 只带正文，等于用例子教模型「不用工具也能说话」。这里把每条
+    历史发言改写成 assistant.tool_calls(send_reply) + 对应的 tool 回执；正文仍在
+    arguments 里，模型能读到，但看到的输出形式是工具调用。
+    """
+    converted: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        if message.get("role") != "assistant" or message.get("tool_calls"):
+            message.pop("_history_msg_id", None)
+            converted.append(message)
+            continue
+        content = str(message.get("content") or "")
+        history_id = message.pop("_history_msg_id", None)
+        if not content:
+            converted.append(message)
+            continue
+        call_id = f"history_{history_id if history_id is not None else index}"
+        converted.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "send_reply",
+                            "arguments": json.dumps({"text": content}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+        )
+        converted.append(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "send_reply",
+                "content": json.dumps({"ok": True}, ensure_ascii=False),
+            }
+        )
+    return converted
 
 
 def build_role_messages(
@@ -112,7 +159,7 @@ def build_role_messages(
     include_boundary_markers: bool = False,
     last_reply_message_id: int | None = None,
     all_new: bool = False,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """为一个队列的所有条目构建角色消息列表(全量)。"""
     return _build_from_entries(
         queue.entries(queue_key),
@@ -134,7 +181,7 @@ def build_role_messages_from_entries(
     bot_account: int = 0,
     include_boundary_markers: bool = False,
     context_entries: list | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """为新增的队列条目构建角色消息列表(增量,用于挂起恢复等场景)。
 
     context_entries:发送者标签的计算上下文(默认取 queue 该键的全量条目)。
@@ -168,7 +215,7 @@ def _build_from_entries(
     last_reply_message_id: int | None,
     all_new: bool,
     label_context_entries: list | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     messages: list[dict[str, str]] = []
     # 发送者标签基于全量上下文计算,保证同一发送者在同一对话中身份恒定
     label_context = entries if label_context_entries is None else label_context_entries
@@ -298,4 +345,4 @@ def _build_from_entries(
     if new_section_opened and new_section_content_emitted:
         if include_boundary_markers:
             messages.append(_user_message("</这是新的可能要回答的内容>"))
-    return messages
+    return _as_send_reply_tool_history(messages)
