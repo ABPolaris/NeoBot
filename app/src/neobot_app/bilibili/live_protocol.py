@@ -95,6 +95,8 @@ class LiveEvent:
     value: int = 0
     ts: int = 0
     raw: dict[str, Any] = dataclasses.field(default_factory=dict)
+    reply_mid: int = 0
+    dmid: str = ""
 
 
 # protobuf 定义 vendor 自 blivedm/models/pb.py
@@ -324,7 +326,18 @@ def _parse_danmaku(payload: dict[str, Any], room_id: int) -> LiveEvent | None:
         ts = _to_seconds(info[0][4])  # type: ignore[index]
     except (IndexError, KeyError, TypeError, ValueError):
         ts = 0
-    return LiveEvent("danmaku", room_id, uid, name, text, 0, ts, payload)
+    reply_mid = 0
+    dmid = ""
+    try:
+        extra = json.loads((info[0][15] or {}).get("extra") or "{}")  # type: ignore[index]
+        reply_mid = _to_int(extra.get("reply_mid"))
+        dmid = str(extra.get("id_str") or "")
+    except (IndexError, KeyError, TypeError, ValueError):
+        pass
+    return LiveEvent(
+        "danmaku", room_id, uid, name, text, 0, ts, payload,
+        reply_mid=reply_mid, dmid=dmid,
+    )
 
 
 def _parse_gift(payload: dict[str, Any], data: dict[str, Any], room_id: int) -> LiveEvent | None:
