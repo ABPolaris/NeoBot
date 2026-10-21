@@ -332,7 +332,7 @@ class BilibiliRuntime:
                     return f"启用失败：{result.get('error') or '未知错误'}"
                 return (
                     f"已启用直播间交互：{result.get('name') or room_id}（房间 {room_id}）。"
-                    "会自动监听弹幕，只在被 @ 时回复。"
+                    "会自动监听弹幕，所有非空弹幕都会触发回复（5 秒冷却，不限于 @）。"
                 )
             result = await self.live_interactor.disable(room_id)
             return f"已{'停用' if result.get('ok') else '未启用'}直播间 {room_id}"

@@ -4,7 +4,7 @@
 再连 B站弹幕 WebSocket（`wss://host:wss_port/sub`）收 DANMU_MSG，按需调用
 provider 生成一句极短回复，再由 BilibiliClient.send_danmaku 发出。
 
-只参与开播阶段：房间 live_status 缓存 60 秒，自动回复走群聊式 WillingService 意愿判断，定时弹幕/手动弹幕都先查；
+只参与开播阶段：房间 live_status 缓存 60 秒，回复意愿按 QQ 群聊同一套公式计算（@ 必回、基础概率、全局/会话/用户系数），再加 cooldown；
 下播时 WSS 可以继续收弹幕（保留历史），但不生成、不发送。
 
 启用房间与定时弹幕持久化在 `<DATA_DIR>/bilibili/live_interact.json`；
@@ -801,7 +801,7 @@ class BilibiliLiveInteractor:
         if my_uid and _to_int(danmu.get("uid")) == my_uid:
             return
         text = str(danmu.get("text") or "")
-        if not self._should_reply(room_id, danmu, text):
+        if not self._should_reply(room_id, danmu, text, my_uid):
             return
         if not self._reply_allowed(room_id):
             return
@@ -905,9 +905,85 @@ class BilibiliLiveInteractor:
                 pass
         return tuple(name for name in names if name)
 
-    def _should_reply(self, room_id: str, danmu: dict[str, Any], text: str) -> bool:
-        """直播互动不抽签：所有非空弹幕都进入回复，节流只靠 cooldown。"""
-        return bool(str(text or "").strip())
+    def _should_reply(
+        self, room_id: str, danmu: dict[str, Any], text: str, my_uid: int = 0
+    ) -> bool:
+        """直播间回复意愿：和 QQ 群聊同一套 manager/系数/@必回规则。"""
+        if not str(text or "").strip():
+            return False
+        willing = self._willing_service
+        if willing is None:
+            return True
+        try:
+            history = self.get_history(_to_int(room_id), 20)
+            observed = tuple(
+                f"{item.get('name') or '观众'}: {item.get('text') or ''}"
+                for item in history
+                if str(item.get("text") or "").strip()
+            )
+            at_me = bool(
+                my_uid and _to_int(danmu.get("reply_mid")) == my_uid
+            )
+            decision = willing.evaluate_live(
+                room_id=_to_int(room_id),
+                uid=_to_int(danmu.get("uid")),
+                name=str(danmu.get("name") or ""),
+                text=text,
+                observed_messages=observed,
+                extra_bot_names=self._known_bot_names(),
+                base_probability=self._reply_chance,
+                mentioned=at_me or None,
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "直播回复意愿计算失败，按不回复处理",
+                room_id=room_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return False
+        self._logger.info(
+            "直播回复意愿",
+            room_id=room_id,
+            probability=f"{decision.probability:.3f}",
+            should_reply=decision.should_reply,
+            reasons=" | ".join(decision.reasons),
+        )
+        return bool(decision.should_reply)
+
+    def get_live_willingness(self, room_id: int = 0) -> dict[str, Any]:
+        """查看直播间意愿系数（WillingService 的 live:<room> 会话系数）。"""
+        if self._willing_service is None:
+            return {"ok": False, "error": "willing_service 未配置"}
+        rid = _to_int(room_id)
+        if rid > 0:
+            return {
+                "room_id": rid,
+                "coefficient": self._willing_service.get_runtime_conversation_coefficient(
+                    f"live:{rid}"
+                ),
+            }
+        summary = self._willing_service.get_runtime_config_summary()
+        return {"ok": True, "summary": summary}
+
+    def set_live_willingness(self, room_id: int, value: float) -> dict[str, Any]:
+        """设置直播间意愿系数 0.0~1.0（WillingService 的 live:<room> 会话系数）。"""
+        rid = _to_int(room_id)
+        if rid <= 0:
+            return {"ok": False, "error": "房间号无效"}
+        if self._willing_service is None:
+            return {"ok": False, "error": "willing_service 未配置"}
+        coefficient = max(0.0, min(1.0, float(value)))
+        self._willing_service.set_runtime_conversation_coefficient(
+            f"live:{rid}", coefficient
+        )
+        return {"ok": True, "room_id": rid, "coefficient": coefficient}
+
+    def remove_live_willingness(self, room_id: int) -> dict[str, Any]:
+        rid = _to_int(room_id)
+        if self._willing_service is None:
+            return {"ok": False, "error": "willing_service 未配置"}
+        self._willing_service.remove_runtime_conversation_coefficient(f"live:{rid}")
+        return {"ok": True, "room_id": rid}
 
     def _mentions_bot(self, text: str) -> bool:
         lowered = text.lower()

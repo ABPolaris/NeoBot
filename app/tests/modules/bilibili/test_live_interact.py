@@ -711,14 +711,33 @@ class _FakeWilling:
     def __init__(self, should_reply: bool) -> None:
         self.should_reply_value = should_reply
         self.calls: list[dict] = []
+        self.coefficients: dict[str, float] = {}
 
     def evaluate_live(self, **kwargs):
         self.calls.append(kwargs)
+        coefficient = self.coefficients.get(kwargs.get("room_id") and f"live:{kwargs['room_id']}")
+        should = self.should_reply_value
+        if coefficient is not None:
+            should = coefficient > 0
         return SimpleNamespace(
-            should_reply=self.should_reply_value,
-            probability=1.0 if self.should_reply_value else 0.0,
+            should_reply=should,
+            probability=1.0 if should else 0.0,
             reasons=("test",),
         )
+
+    def set_runtime_conversation_coefficient(self, conv_id, value):
+        self.coefficients[conv_id] = value
+        return "ok"
+
+    def get_runtime_conversation_coefficient(self, conv_id):
+        return self.coefficients.get(conv_id)
+
+    def remove_runtime_conversation_coefficient(self, conv_id):
+        self.coefficients.pop(conv_id, None)
+        return "ok"
+
+    def get_runtime_config_summary(self):
+        return "test"
 
 
 async def test_live_auto_reply_uses_willingness_without_at(tmp_path: Path) -> None:
@@ -731,7 +750,7 @@ async def test_live_auto_reply_uses_willingness_without_at(tmp_path: Path) -> No
 
     await interactor._handle_danmu("5440", {"uid": 9, "name": "观众", "text": "在吗"})
     assert client.sent == [(5440, "欢迎")]
-    assert willing.calls == []
+    assert willing.calls and willing.calls[0]["room_id"] == 5440
 
 
 async def test_live_auto_reply_skips_when_willingness_denies(tmp_path: Path) -> None:
@@ -742,7 +761,7 @@ async def test_live_auto_reply_skips_when_willingness_denies(tmp_path: Path) -> 
     interactor._willing_service = _FakeWilling(False)
 
     await interactor._handle_danmu("5440", {"uid": 9, "name": "观众", "text": "在吗"})
-    assert client.sent == [(5440, "欢迎")]
+    assert client.sent == []
 
 
 
@@ -893,3 +912,15 @@ async def test_live_summarizes_every_200(tmp_path: Path) -> None:
     await asyncio.gather(*interactor._summary_tasks)
     assert interactor._room_memory["5440"] == "这直播间在聊游戏"
     archive.set.assert_awaited_once()
+
+
+
+def test_live_willingness_coefficient(tmp_path: Path) -> None:
+    willing = _FakeWilling(True)
+    interactor = BilibiliLiveInteractor(None, data_dir=tmp_path, willing_service=willing)
+    assert interactor._should_reply("5440", {"uid": 8}, "在吗") is True
+    interactor.set_live_willingness(5440, 0.0)
+    assert interactor._should_reply("5440", {"uid": 8}, "在吗") is False
+    assert interactor.get_live_willingness(5440)["coefficient"] == 0.0
+    interactor.remove_live_willingness(5440)
+    assert interactor._should_reply("5440", {"uid": 8}, "在吗") is True
