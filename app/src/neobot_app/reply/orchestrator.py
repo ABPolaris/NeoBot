@@ -313,6 +313,9 @@ def _parse_tool_args(value: object) -> dict[str, Any]:
 EMPTY_TURN_TRUNCATED = "truncated"
 #: 空轮次成因：模型没给正文也没调工具，且不是长度截断。
 EMPTY_TURN_NO_OUTPUT = "empty"
+#: 被 @ 的触发消息优先级提示；只在该轮触发消息确实 @ 了 bot 时注入。
+_AT_MENTION_PRIORITY_BLOCK = "<@>这是@你的消息,你应该优先回复<@>"
+
 _NO_TOOL_CALL_REMINDER = (
     "系统提醒：你刚才没有调用任何工具。"
     "如果你确认不需要回复或执行任何操作，请调用 cancel 工具结束；"
@@ -4485,6 +4488,16 @@ class ReplyOrchestrator:
 
     # ── Prompt 构建 ──
 
+    def _is_at_mentioned_event(self, event: ReplyEvent) -> bool:
+        service = self._willing_service
+        message = getattr(event, "message", None)
+        if service is None or message is None:
+            return False
+        try:
+            return bool(service.is_at_mentioned(message))
+        except Exception:
+            return False
+
     async def _build_prompt(
         self,
         event: ReplyEvent,
@@ -4543,6 +4556,8 @@ class ReplyOrchestrator:
                         self._record_debug(
                             "at_mention_wait_hint_injected", event, queue_key=queue_key
                         )
+                if self._is_at_mentioned_event(event):
+                    prompt = prompt + "\n" + _AT_MENTION_PRIORITY_BLOCK
                 after_prompt = await self._emit_runtime_event(
                     "prompt.build.after", event, queue_key=queue_key, prompt=prompt
                 )
