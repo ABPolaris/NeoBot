@@ -66,7 +66,7 @@
 - 主动观察：可配置定时看画面并决定是否发弹幕，默认关闭
 - 复用QQ档案表：直播间用 group_summary/group_profile（key 前缀 bilibili_live:room:），观众用 user_summary/user_profile（key 前缀 bilibili_live:uid:）；每 200 条弹幕自动总结一次并注入 <直播间档案>/<观众档案>，没有手动存记忆工具
 - 截图保留：默认关闭；开启后每条自动回复保存一张直播画面
-- 回复可带 reply_to（弹幕行首 uid），B站会 @ 对方（被 @/叫名字按 at_mention_guaranteed_reply 必回，其余按概率/问句/系数）；排除自己、同房间 20s 冷却 + 每分钟最多 3 条、回复截断 20 字符。无 willing 服务时退回旧的 live_interaction_at_only @过滤。
+- 自动回复按 QQ 群聊同一套意愿公式：基础概率 0.5 + 问句加成，再乘全局/会话/用户系数；@/叫名字按 at_mention_guaranteed_reply 必回。之后再加 5 秒冷却；排除自己的弹幕。回复可带 reply_to（弹幕行首 uid），B站会 @ 对方。
 - 状态文件：data/bilibili/live_interact.json，重启自动恢复。
 - 直播监听（开播/下播通知）在 streaming_parser 插件里，和这里完全分开。
 
@@ -74,9 +74,10 @@
 - bilibili_live__status / send_danmaku / read_history（默认 500 条，按 [HH:MM:SS] 显示，间隔超 5 分钟插时间线）
 - bilibili_live__snapshot / transcribe：按需截直播画面一帧、按需截 10–30 秒音频做 ASR（非实时字幕）
 - bilibili_live__enable / disable
+- bilibili_live__get_live_willingness / set_live_willingness / remove_live_willingness：查看/设置/移除直播间意愿系数（0~1，默认 1=所有非空弹幕都回；运行时内存生效）
 - bilibili_live__schedule / list_schedules / delete_schedule：本地时间 HH:MM，recurrence=once/daily/weekly；到点且房间在播才生成并发送，同一时段不重复；下播跳过。
 - 所有自动回复、定时弹幕、手动发弹幕都先检查开播状态，下播不互动；只在开播阶段参与。
-- 自动回复、定时弹幕、跨聊天直播投递触发时，会先抓一帧当前画面并让视觉模型生成画面描述，作为回复上下文（没有视觉模型时跳过截图）。
+- 普通自动回复不再自动截帧；主动观察会看画面，截图保留默认关闭；需要画面时用 bilibili_live__snapshot。
 - 跨聊天可通过 target_kind=bilibili + live:<room_id> 把任务派给直播间（同样仅开播时发送）。
 
 ## UP投稿更新轮询（调研/预备，未实装）
@@ -93,7 +94,7 @@ B站视频搜索/看视频走上面的 agent 工具（QQ 侧触发），直播�
 ## 直播媒体能力（2026-10-20）
 
 - 直播拉流：getRoomPlayInfo 匿名拿 FLV/HLS 地址，缓存到过期前 5 分钟。
-- 直播画面：bilibili_live__snapshot 按需截一帧 JPEG（ffmpeg，640 宽，存 data/live_frames），可附带视觉模型描述；自动回复/定时弹幕/跨聊天会各抓一帧注入上下文。
+- 直播画面：bilibili_live__snapshot 按需截一帧 JPEG（ffmpeg，640 宽，存 data/live_frames），可附带视觉模型描述；普通自动回复不再每轮截帧。
 - 直播 ASR：bilibili_live__transcribe 按需截 10–30 秒音频转 16k mono mp3 后走现有 ASR；不是实时字幕，也没有连续转写。
 - 直播历史：每房间最近 500 条，带时间戳；间隔超过 5 分钟插入时间线。
 - 仍只处理 DANMU_MSG；礼物/SC/进场/舰长等事件未接入。
