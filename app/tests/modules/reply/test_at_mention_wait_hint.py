@@ -83,7 +83,8 @@ async def test_build_prompt_appends_hint_to_context_blocks() -> None:
 
     prompt = await orch._build_prompt(_event(), queue=SimpleNamespace(), queue_key="42", context_blocks=context)
 
-    assert prompt == "系统提示词"
+    assert prompt.startswith("系统提示词")
+    assert "<@>这是@你的消息,你应该优先回复<@>" in prompt
     assert [block["role"] for block in context] == ["user"]
     assert "wait" in context[0]["content"]
 
@@ -93,6 +94,7 @@ async def test_build_prompt_skips_hint_without_at_mention() -> None:
     _wire_build_prompt(orch)
     context: list[dict[str, str]] = []
 
-    await orch._build_prompt(_event(), queue=SimpleNamespace(), queue_key="42", context_blocks=context)
+    prompt = await orch._build_prompt(_event(), queue=SimpleNamespace(), queue_key="42", context_blocks=context)
 
     assert context == []
+    assert "<@>这是@你的消息,你应该优先回复<@>" not in prompt
