@@ -63,6 +63,7 @@ KNOWN_SECTIONS = (
     "maintenance",
     "wake_up",
     "at_mention_wait",
+    "live_chat",
     "sleep_cmd",
     "awake_cmd",
 )
@@ -72,6 +73,7 @@ _TOML_QUOTE = "'" * 3
 
 # 极端兜底:内置模板文件丢失时仍可工作的最小提示词
 _FALLBACK_SECTIONS: dict[str, dict[str, str]] = {
+    "live_chat": {"template": ""},
     "group_chat": {
         "template": (
             "<你是谁>\n你的名字是{bot_name},你的QQ号是{bot_account}{other_name}.\n"

@@ -1778,8 +1778,8 @@ class Bilibili:
         metadata={"description": "B站登录 cookie 保存路径（相对数据目录）"},
     )
     live_interaction_cooldown_seconds: float = field(
-        default=20.0,
-        metadata={"description": "直播间自动回复同房间冷却（秒）"},
+        default=5.0,
+        metadata={"description": "直播间自动回复同房间冷却（秒）；所有弹幕都会触发回复，节流只靠这一项"},
     )
     live_interaction_max_reply_chars: int = field(
         default=20,
@@ -1787,7 +1787,7 @@ class Bilibili:
     )
     live_interaction_at_only: bool = field(
         default=True,
-        metadata={"description": "直播间是否只回复 @bot 的弹幕（关闭后会对所有弹幕回复，慎用）"},
+        metadata={"description": "已废弃：现在所有非空弹幕都会触发回复，节流由 live_interaction_cooldown_seconds 控制"},
     )
     live_interaction_mention_names: Optional[List[str]] = field(
         default_factory=list,
@@ -1796,6 +1796,37 @@ class Bilibili:
                 "直播间 @ 识别额外名单（B站昵称/曾用名等）；会自动加入 B站登录账号 uname，"
                 "用于把含 @ 的弹幕识别为对 bot 的提及。"
             )
+        },
+    )
+    live_interaction_asr_enabled: bool = field(
+        default=False,
+        metadata={
+            "description": (
+                "直播间自动 ASR 上下文默认值（默认关闭）。大部分情况下效果不好，"
+                "尤其是带有较大 BGM、多人说话或音质较差的场景；建议按需用 /直播ASR 单独打开。"
+            )
+        },
+    )
+    live_interaction_auto_look_enabled: bool = field(
+        default=False,
+        metadata={
+            "description": "是否定时主动看一眼直播间画面并发一条弹幕（默认关闭）"
+        },
+    )
+    live_interaction_auto_look_interval_minutes: int = field(
+        default=30,
+        metadata={"description": "主动观察间隔（分钟，最小 5）"},
+    )
+    live_interaction_summary_every: int = field(
+        default=200,
+        metadata={
+            "description": "直播间弹幕自动总结间隔（条）；每累计这么多条自动压缩到 group_summary（key 带 bilibili_live:room: 前缀），0 关闭"
+        },
+    )
+    live_interaction_screenshot_replies: bool = field(
+        default=False,
+        metadata={
+            "description": "是否把每条自动回复时的直播画面截图保存到数据目录（默认关闭）"
         },
     )
     live_interaction_reply_chance: float = field(

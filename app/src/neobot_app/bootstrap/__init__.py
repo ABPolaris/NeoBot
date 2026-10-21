@@ -1105,6 +1105,7 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
             logger=logger_factory.get_logger("app.bilibili"),
             bot_name=config.bot.nick_name,
             bot_data=config.bot.bot_data,
+            prompt_store=prompt_store,
         )
         if command_service is not None:
             bili_runtime.register_commands(command_service)

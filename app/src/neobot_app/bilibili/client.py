@@ -796,8 +796,10 @@ class BilibiliClient:
         data = payload.get("data")
         return data if isinstance(data, dict) else {}
 
-    def send_danmaku(self, room_id: int, text: str) -> bool:
-        """发送直播弹幕；未登录/参数不完整/接口失败返回 False。"""
+    def send_danmaku(
+        self, room_id: int, text: str, *, reply_mid: int = 0, reply_uname: str = ""
+    ) -> bool:
+        """发送直播弹幕；reply_mid/reply_uname 非空时 @ 目标观众。"""
         room_id = _to_int(room_id)
         message = (text or "").strip()
         if room_id <= 0 or not message:
@@ -821,6 +823,9 @@ class BilibiliClient:
             "rnd": int(time.time()),
             "csrf": self._bili_jct,
             "csrf_token": self._bili_jct,
+            "reply_mid": _to_int(reply_mid),
+            "reply_uname": str(reply_uname or ""),
+            "reply_attr": 0,
         }
         self._rate_limit_wait()
         try:
