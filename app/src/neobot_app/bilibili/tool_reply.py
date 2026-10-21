@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from dataclasses import dataclass
 from typing import Any
 
 from neobot_chat import Agent
 from neobot_chat.schema.types import ToolAccessRule
 from neobot_chat.tools.toolset import ToolSpec, Toolset
+from neobot_app.reply.postprocess import split_into_sentences_w_remove_punctuation
 
 _SEND_REPLY = {
     "type": "function",
@@ -37,12 +39,15 @@ _CANCEL = {
 class ToolReply:
     text: str | None = None
     usage: dict[str, Any] | None = None
+    segments: list[str] | None = None
 
 
 class _ReplyExecutor:
-    def __init__(self, *, max_chars: int = 0) -> None:
+    def __init__(self, *, max_chars: int = 0, split: bool = False) -> None:
         self.max_chars = max(0, int(max_chars or 0))
+        self.split = bool(split)
         self.text: str | None = None
+        self.segments: list[str] | None = None
         self.cancelled = False
 
     def definitions(self) -> list[dict]:
@@ -61,7 +66,29 @@ class _ReplyExecutor:
                 self.cancelled = True
                 self.text = None
                 return '{"ok": true, "cancelled": true}'
-            if self.max_chars:
+            if self.split and self.max_chars:
+                parts = [
+                    part.strip()
+                    for part in split_into_sentences_w_remove_punctuation(
+                        text, rng=random.Random(0)
+                    )
+                    if part.strip()
+                ]
+                overlong = [part for part in parts if len(part) > self.max_chars]
+                if not parts:
+                    return '{"ok": false, "error": "弹幕为空，请重写"}'
+                if overlong:
+                    return (
+                        '{"ok": false, "error": "B站弹幕每条最多'
+                        + str(self.max_chars)
+                        + '字，以下句子超长，请改短后再次调用 send_reply: '
+                        + " / ".join(overlong)[:2000]
+                        + '"}'
+                    )
+                self.segments = parts
+                self.text = " ".join(parts)
+                return '{"ok": true}'
+            if self.max_chars and len(text) > self.max_chars:
                 text = text[: self.max_chars]
             self.text = text
             return '{"ok": true}'
@@ -77,12 +104,13 @@ async def run_tool_reply(
     user: str,
     *,
     max_chars: int = 0,
+    split: bool = False,
     timeout: float = 90.0,
 ) -> ToolReply:
     """跑一轮只含 send_reply/cancel 的 agent 循环，返回工具指定的回复。"""
     if provider is None:
         return ToolReply()
-    executor = _ReplyExecutor(max_chars=max_chars)
+    executor = _ReplyExecutor(max_chars=max_chars, split=split)
     toolset = Toolset(
         executor=executor,
         specs=[
@@ -94,7 +122,7 @@ async def run_tool_reply(
         provider,
         toolset=toolset,
         include_builtin_tools=False,
-        max_iterations=1,
+        max_iterations=3,
         system_prompt=system,
     )
     state = await asyncio.wait_for(
@@ -109,4 +137,8 @@ async def run_tool_reply(
         if isinstance(value, dict):
             usage = value
         break
-    return ToolReply(text=None if executor.cancelled else executor.text, usage=usage)
+    return ToolReply(
+        text=None if executor.cancelled else executor.text,
+        usage=usage,
+        segments=None if executor.cancelled else executor.segments,
+    )
