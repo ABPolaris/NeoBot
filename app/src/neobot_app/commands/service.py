@@ -212,7 +212,7 @@ class CommandService:
             result_text = await command.handler(context)
         except Exception as exc:
             self._log(f"命令 /{command.name} 执行失败: {exc}")
-            result_text = f"命令执行失败: {exc}"
+            result_text = "命令执行失败，请稍后重试"
 
         if command.sync_reply or context.sync_reply:
             # 同步触发回复管线:结果作为背景内容交给主 Agent 处理
