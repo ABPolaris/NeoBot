@@ -68,6 +68,10 @@ class WebTools:
             raise AgentToolError("INVALID_ARGS", "Unknown search engine")
         engine_arg = None if not engine or engine == "auto" else engine
         queries = list(dict.fromkeys(q.strip() for q in queries))
+        if engine_arg == "deepseek" and any(len(q) > 128 for q in queries):
+            raise AgentToolError(
+                "INVALID_ARGS", "DeepSeek 搜索 query 最多 128 字符，请缩短后重试"
+            )
 
         async def search(query: str) -> Any:
             # Each query owns its result indices and history; no cross-chat state.

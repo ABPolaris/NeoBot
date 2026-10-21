@@ -703,15 +703,23 @@ class BilibiliLiveInteractor:
             return
         if not await self.is_live(_to_int(room_id)):
             return
-        reply = await self._generate_reply(
+        replies = await self._generate_reply(
             text, _to_int(room_id), str(danmu.get("name") or "")
         )
-        if not reply:
+        if not replies:
             return
-        if not await self._post_danmaku(client, _to_int(room_id), reply, action="自动回复"):
-            return
+        for reply in replies:
+            if not await self._post_danmaku(
+                client, _to_int(room_id), reply, action="自动回复"
+            ):
+                return
         self._record_reply(room_id)
-        self._logger.info("B站直播已自动回复", room_id=room_id, chars=len(reply))
+        self._logger.info(
+            "B站直播已自动回复",
+            room_id=room_id,
+            segments=len(replies),
+            chars=sum(len(item) for item in replies),
+        )
 
     def _record_history(self, room_id: str, danmu: dict[str, Any]) -> None:
         text = str(danmu.get("text") or "").strip()
@@ -842,7 +850,9 @@ class BilibiliLiveInteractor:
         except Exception:
             pass
 
-    async def _generate_reply(self, text: str, room_id: int, user_name: str = "") -> str:
+    async def _generate_reply(
+        self, text: str, room_id: int, user_name: str = ""
+    ) -> list[str]:
         room = self._rooms.get(str(room_id)) or {}
         ctx = LiveDanmakuContext(
             bot_name=self._bot_name,
@@ -865,6 +875,7 @@ class BilibiliLiveInteractor:
                 system,
                 content,
                 max_chars=self._max_reply_chars,
+                split=True,
                 timeout=90.0,
             )
         except asyncio.CancelledError:
@@ -874,10 +885,12 @@ class BilibiliLiveInteractor:
                 "B站直播回复生成失败",
                 error=f"{type(exc).__name__}: {exc}",
             )
-            return ""
-        return result.text or ""
+            return []
+        return result.segments or ([result.text] if result.text else [])
 
-    async def _generate_schedule_danmaku(self, prompt: str, context: str, room_id: int) -> str:
+    async def _generate_schedule_danmaku(
+        self, prompt: str, context: str, room_id: int
+    ) -> list[str]:
         room = self._rooms.get(str(room_id)) or {}
         ctx = LiveDanmakuContext(
             bot_name=self._bot_name,
@@ -900,6 +913,7 @@ class BilibiliLiveInteractor:
                 system,
                 content,
                 max_chars=self._max_reply_chars,
+                split=True,
                 timeout=90.0,
             )
         except asyncio.CancelledError:
@@ -909,8 +923,8 @@ class BilibiliLiveInteractor:
                 "B站直播定时弹幕生成失败",
                 error=f"{type(exc).__name__}: {exc}",
             )
-            return ""
-        return result.text or ""
+            return []
+        return result.segments or ([result.text] if result.text else [])
 
     async def _chat(self, messages: list[dict[str, str]], *, error_label: str) -> str:
         if self._provider is None:
@@ -975,17 +989,24 @@ class BilibiliLiveInteractor:
                         schedule_id=schedule.get("id"),
                     )
                     continue
-                text = await self._generate_schedule_danmaku(
+                texts = await self._generate_schedule_danmaku(
                     str(schedule.get("prompt") or ""),
                     self.format_history(rid, 50),
                     rid,
                 )
-                if not text:
+                if not texts:
                     continue
                 client = self._get_client()
                 if client is None:
                     continue
-                if not await self._post_danmaku(client, rid, text, action="定时弹幕"):
+                sent = True
+                for text in texts:
+                    if not await self._post_danmaku(
+                        client, rid, text, action="定时弹幕"
+                    ):
+                        sent = False
+                        break
+                if not sent:
                     continue
                 fired.append(
                     {

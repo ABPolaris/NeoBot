@@ -17,7 +17,21 @@ class FakeProvider:
 
     async def chat(self, messages, tools=None):
         self.calls.append(messages)
-        return {"role": "assistant", "content": self.content}
+        if self.content.strip().upper() == "[SKIP]":
+            name, arguments = "cancel", {}
+        else:
+            name, arguments = "send_dynamic", {"text": self.content}
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
+                }
+            ],
+        }
 
 
 class FakeClient:
@@ -118,19 +132,18 @@ async def test_publish_error_is_reported() -> None:
     assert "风控" in result["error"]
 
 
-async def test_material_provider_is_used_in_prompt() -> None:
+async def test_material_provider_is_not_used_for_private_content() -> None:
     provider = FakeProvider()
     seen: list[str] = []
 
     async def material():
         seen.append("called")
-        return "群里今天在聊新番"
+        return "私聊内容不应进入日记"
 
     service = _service(provider, FakeClient(), material_provider=material)
     await service.generate()
 
-    assert seen == ["called"]
-    assert "群里今天在聊新番" in provider.calls[0][1]["content"]
+    assert seen == []
 
 
 async def test_archive_material_fallback() -> None:
@@ -140,7 +153,7 @@ async def test_archive_material_fallback() -> None:
     material = await service.collect_material()
 
     assert "群里在聊游戏" in material
-    assert archive.calls == ["group_summary", "user_summary"]
+    assert archive.calls == ["group_summary"]
 
 
 async def test_archive_material_skips_yesterdays_items() -> None:
@@ -177,3 +190,16 @@ async def test_diary_skill_unknown_tool() -> None:
     skill = BilibiliDiarySkill(_service())
     result = json.loads(await skill.execute("nope", {}))
     assert result["ok"] is False
+
+
+
+async def test_collect_material_uses_group_only_and_diff(tmp_path) -> None:
+    archive = FakeArchive([_item("123", "群里在聊游戏")])
+    service = _service(FakeProvider(), FakeClient(), archive_service=archive, data_dir=tmp_path)
+
+    first = await service.collect_material()
+    second = await service.collect_material()
+
+    assert "+ [群:123] 群里在聊游戏" in first
+    assert second == ""
+    assert archive.calls == ["group_summary", "group_summary"]

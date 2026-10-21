@@ -86,36 +86,6 @@ from neobot_app.runtime.process_stop import ProcessStopSignal
 from neobot_app.skills.balance_guide import sync_balance_query_skill
 
 
-_MAINTENANCE_SYSTEM_PROMPT = (
-    "你是一个沙箱文件维护助手，负责检查和清理沙箱中的文件。\n\n"
-    "## 核心规则\n"
-    "1. **清理前必须先阅读 sandbox/文件存储.md 了解当前存储规范**\n"
-    "2. 如文件存储.md 不存在，先检查 sandbox/ 目录结构，按默认规范创建文件存储.md\n"
-    "3. 清理完成后必须调用 file_storage__update_storage_doc 更新索引\n\n"
-    "## 默认存储规范（文件存储.md 不存在时参考）\n"
-    "- tools/ — 可复用的工具脚本、程序\n"
-    "- docs/ — 文档、参考资料、说明文件\n"
-    "- assets/ — 静态资源（图片、字体、模板等）\n"
-    "- temp/ — 临时文件，按 chat_flow_id 分子目录，可随时清理\n"
-    "- gift/ — 礼物文件，由 gift skill 管理，勿手动编辑\n"
-    "- 文件命名统一使用 snake_case，中文名保留原样\n"
-    "- 根目录只保留 文件存储.md、TODO.md 和持久化目录\n\n"
-    "## 维护流程\n"
-    "1. 先调用 sandbox_maintenance__check_capacity 了解容量\n"
-    "2. 调用 sandbox_maintenance__scan_temp_files 检查临时文件\n"
-    "3. 调用 sandbox_maintenance__get_maintenance_status 查看状态\n"
-    "4. 阅读 sandbox/文件存储.md 了解当前规范\n"
-    "5. 根据需要清理过期临时文件、垃圾文件、错放文件\n"
-    "6. 调用 sandbox_maintenance__trigger_maintenance 整理持久化文件\n"
-    "7. 完成后调用 file_storage__update_storage_doc 更新索引\n\n"
-    "## 注意\n"
-    "- 只做文件清理和整理，不实现新工具，不处理 TODO\n"
-    "- 输出简洁明了，完成每步后汇报结果\n\n"
-    "## 按需加载工具\n"
-    "- 常驻工具只覆盖维护常用能力；需要其它技能时先调用 skills__load_tools 加载"
-    "（如 [\"gallery\"]、[\"agent_tools_files\"]），加载后本轮即可直接调用"
-)
-
 # 沙箱维护 Agent 的常驻技能：它每次运行要发 16~23 次模型调用，
 # 常驻全部技能（173 个工具 / 71K 字符）是纯固定开销；其余能力用 skills__load_tools 按需加载。
 MAINTENANCE_RESIDENT_SKILLS = frozenset(
@@ -331,11 +301,11 @@ def _make_maintenance_coro(
     """
     from neobot_chat.runtime.agent import Agent
 
-    maintenance_prompt = _MAINTENANCE_SYSTEM_PROMPT
-    if prompt_store is not None:
-        maintenance_prompt = prompt_store.get(
-            "maintenance", "system_prompt", default=_MAINTENANCE_SYSTEM_PROMPT
-        )
+    from neobot_app.prompt.store import get_template_value
+
+    maintenance_prompt = get_template_value(
+        prompt_store, "maintenance", "system_prompt"
+    )
 
     from neobot_app.skills.agent_toolset import LiveToolset, SkillToolsetExecutor
 
@@ -1212,6 +1182,10 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
         skill_manager=skill_manager,
         standby_service=standby_service,
     )
+    try:
+        bili_runtime.set_archive_summary_service(archive_summary_service)
+    except Exception:
+        pass
     tts_service = build_tts_service(config=config, logger_factory=logger_factory)
 
     # ── 自修复 Agent 装配 ──
@@ -1540,11 +1514,9 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
         ]
 
     async def _maintenance_agent_parts() -> list:
-        prompt = _MAINTENANCE_SYSTEM_PROMPT
-        if prompt_store is not None:
-            prompt = prompt_store.get(
-                "maintenance", "system_prompt", default=_MAINTENANCE_SYSTEM_PROMPT
-            )
+        from neobot_app.prompt.store import get_template_value
+
+        prompt = get_template_value(prompt_store, "maintenance", "system_prompt")
         from neobot_app.skills.agent_toolset import LiveToolset, SkillToolsetExecutor
 
         definitions = LiveToolset(

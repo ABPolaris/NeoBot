@@ -486,34 +486,6 @@ def cmd_install_browser(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
-_MAINTENANCE_SYSTEM_PROMPT = (
-    "你是一个沙箱文件维护助手，负责检查和清理沙箱中的文件。\n\n"
-    "## 核心规则\n"
-    "1. **清理前必须先阅读 sandbox/文件存储.md 了解当前存储规范**\n"
-    "2. 如文件存储.md 不存在，先检查 sandbox/ 目录结构，按默认规范创建文件存储.md\n"
-    "3. 清理完成后必须调用 file_storage__update_storage_doc 更新索引\n\n"
-    "## 默认存储规范（文件存储.md 不存在时参考）\n"
-    "- tools/ — 可复用的工具脚本、程序\n"
-    "- docs/ — 文档、参考资料、说明文件\n"
-    "- assets/ — 静态资源（图片、字体、模板等）\n"
-    "- temp/ — 临时文件，按 chat_flow_id 分子目录，可随时清理\n"
-    "- gift/ — 礼物文件，由 gift skill 管理，勿手动编辑\n"
-    "- 文件命名统一使用 snake_case，中文名保留原样\n"
-    "- 根目录只保留 文件存储.md、TODO.md 和持久化目录\n\n"
-    "## 维护流程\n"
-    "1. 先调用 sandbox_maintenance__check_capacity 了解容量\n"
-    "2. 调用 sandbox_maintenance__scan_temp_files 检查临时文件\n"
-    "3. 调用 sandbox_maintenance__get_maintenance_status 查看状态\n"
-    "4. 阅读 sandbox/文件存储.md 了解当前规范\n"
-    "5. 根据需要清理过期临时文件、垃圾文件、错放文件\n"
-    "6. 调用 sandbox_maintenance__trigger_maintenance 整理持久化文件\n"
-    "7. 完成后调用 file_storage__update_storage_doc 更新索引\n\n"
-    "## 注意\n"
-    "- 只做文件清理和整理，不实现新工具，不处理 TODO\n"
-    "- 输出简洁明了，完成每步后汇报结果"
-)
-
-
 async def _run_sandbox_cleanup() -> int:
     """独立启动 AI agent 执行沙箱维护清理。不依赖运行中的 Bot。"""
     from dataclasses import dataclass
@@ -608,15 +580,22 @@ async def _run_sandbox_cleanup() -> int:
     # 6. 创建 Agent
     from neobot_chat.runtime.agent import Agent
 
-    maintenance_prompt = _MAINTENANCE_SYSTEM_PROMPT
-    try:
-        from neobot_app.prompt.store import PromptStore, sync_default_prompts
+    from neobot_app.prompt.store import (
+        DEFAULT_TEMPLATE_FILE,
+        PromptStore,
+        get_template_value,
+        parse_prompt_file,
+        sync_default_prompts,
+    )
 
+    builtin = parse_prompt_file(DEFAULT_TEMPLATE_FILE).get("maintenance", {})
+    maintenance_prompt = str(builtin.get("system_prompt") or "").strip()
+    try:
         sync_default_prompts(DATA_DIR)
         prompt_store = PromptStore(DATA_DIR)
-        maintenance_prompt = prompt_store.get(
-            "maintenance", "system_prompt", default=_MAINTENANCE_SYSTEM_PROMPT
-        )
+        maintenance_prompt = get_template_value(
+            prompt_store, "maintenance", "system_prompt"
+        ) or maintenance_prompt
     except Exception:
         pass
 
@@ -1130,3 +1109,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    #无血无肉不作真?寸心寸血铸此身.

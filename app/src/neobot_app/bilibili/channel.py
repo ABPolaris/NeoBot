@@ -14,11 +14,12 @@ conversation_id 约定（CrossChatSkill 的 target_id）：
 
 from __future__ import annotations
 
+import random
 from typing import Any
 
 from neobot_app.bilibili._compat import call_client, get_field, resolve_client
 from neobot_app.bilibili.prompts import MAX_LIVE_DANMAKU_CHARS
-from neobot_app.bilibili.reply_engine import clean_reply
+from neobot_app.reply.postprocess import split_into_sentences_w_remove_punctuation
 from neobot_app.utils.logger import get_module_logger
 
 logger = get_module_logger("bilibili.channel")
@@ -125,16 +126,28 @@ class BilibiliCrossChatChannel:
         reply = await self._engine.generate_task_reply(content, history=history, live=True)
         if reply is None:
             return False, "", "B站侧决定不回应这个任务"
-        reply = clean_reply(reply, MAX_LIVE_DANMAKU_CHARS)
-        if not reply:
-            return False, "", "B站弹幕为空"
-        result = await self._live.send_danmaku(room_id, reply)
-        if not result.get("ok"):
-            detail = str(result.get("error") or "B站直播弹幕发送失败")
-            logger.warning(
-                "B站直播跨聊天投递失败", room_id=room_id, error=detail
+        segments = [
+            part.strip()
+            for part in split_into_sentences_w_remove_punctuation(
+                reply, rng=random.Random(0)
             )
-            return False, reply, detail
+            if part.strip()
+        ]
+        if not segments:
+            return False, "", "B站弹幕为空"
+        overlong = [part for part in segments if len(part) > MAX_LIVE_DANMAKU_CHARS]
+        if overlong:
+            return False, reply, "弹幕超过20字，请改短后重新投递"
+        sent_parts: list[str] = []
+        for part in segments:
+            result = await self._live.send_danmaku(room_id, part)
+            if not result.get("ok"):
+                detail = str(result.get("error") or "B站直播弹幕发送失败")
+                logger.warning(
+                    "B站直播跨聊天投递失败", room_id=room_id, error=detail
+                )
+                return False, " ".join(sent_parts), detail
+            sent_parts.append(part)
         logger.info(
             "B站直播跨聊天任务已发送", room_id=room_id, chars=len(reply)
         )

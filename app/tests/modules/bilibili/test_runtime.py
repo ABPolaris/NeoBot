@@ -97,3 +97,31 @@ async def test_run_does_not_start_diary_when_disabled(tmp_path) -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+
+async def test_diary_loop_flushes_summary_before_run(tmp_path, monkeypatch) -> None:
+    import neobot_app.bilibili.runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "DIARY_SUMMARY_SETTLE_SECONDS", 0)
+    runtime = _runtime(tmp_path)
+    delays = iter([0, None])
+    runtime._seconds_until_diary = lambda now=None: next(delays)  # type: ignore[method-assign]
+    flushed: list[bool] = []
+    order: list[str] = []
+
+    class _Summary:
+        async def flush_all(self, timeout=0):
+            flushed.append(True)
+            order.append("summary")
+
+    async def _run() -> dict:
+        order.append("diary")
+        return {"ok": True}
+
+    runtime.set_archive_summary_service(_Summary())
+    runtime.diary.run = _run  # type: ignore[method-assign]
+    await asyncio.wait_for(runtime._diary_loop(), timeout=5)
+
+    assert flushed == [True]
+    assert order == ["summary", "diary"]

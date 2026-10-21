@@ -17,6 +17,7 @@ from neobot_app.time_context import get_current_time_values
 BILI_HUMAN_FEEL = """<活人感增强>
 - 禁止使用以下词汇或句式：「调调」「够狠的」「xx归xx，但xxx」「好歹xx」「听着xx，最后xx」「实际上xx」。
 - 对你不明确知道的内容（例如没有具体资料的动漫、游戏、人物、事件等话题），禁止插话；即使插话也不应该装作知道，严禁任何形式的不懂装懂。
+- 禁止复述别人说的话再加以评价,除非被明确要求,否则禁止复述/转述别人说的话。
 </活人感增强>"""
 
 #: 基于 QQ 群聊 <回复要求>，只去掉长度限制和 B站没有的工具指令；不新增规则。
@@ -152,24 +153,26 @@ def build_diary_prompt(
     bot_data: str = "",
     max_chars: int = 600,
     max_material_chars: int = 6000,
+    requirement: str = "",
 ) -> tuple[str, str]:
     """B站动态日记：把今天的聊天/档案素材写成一条动态。"""
     system = "\n".join(
         [
             _identity(bot_name, 0, bot_data, ""),
             BILI_HUMAN_FEEL,
+            "<cot>这是你今天在QQ聊天的经历,你打算在B站写一篇动态作为日记,如果觉得没有什么好写的可以cancel掉,如果打算写,不要写隐私和具体的人名</cot>",
+            "<日记素材>先调用 read_diary_material 查看今天的群聊摘要；每行前缀 + 表示今天新增/变化；材料多时用 offset 翻页。</日记素材>",
             _DIARY_RULES,
+            (f"<日记要求>{requirement}</日记要求>" if str(requirement or "").strip() else ""),
             f"<长度>整条动态控制在{max_chars}字以内。</长度>",
         ]
     )
     body = str(material or "").strip()
     if max_material_chars > 0 and len(body) > max_material_chars:
         body = body[:max_material_chars] + "\n...[素材过长已截断]"
-    user = (
-        f"<日期>{date_text}</日期>\n"
-        f"<今日聊天与档案>\n{body or '(今天没有可用素材)'}\n</今日聊天与档案>\n"
-        "请根据以上素材,写出今天的B站动态正文。"
-    )
+    user = f"<日期>{date_text}</日期>"
+    if body:
+        user += f"\n<今日聊天与档案>\n{body}\n</今日聊天与档案>"
     return system, user
 
 
