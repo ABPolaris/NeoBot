@@ -208,3 +208,23 @@ async def test_goal_runs_after_approved_root_turn_and_stops_at_budget(tmp_path):
         assert not runtime.goals.is_running_round(replace(context, human_request=False))
     finally:
         await runtime.close()
+
+
+
+async def test_runtime_accepts_notification_hub(tmp_path) -> None:
+    """通知中心存在时报告工具必须在 _definitions 初始化后注册（启动回归）。"""
+    class Hub:
+        async def publish(self, **kwargs):
+            return True
+
+    runtime = AgentToolRuntime(
+        SandboxService(tmp_path / "sandbox"),
+        state_dir=tmp_path / "state",
+        config=AgentToolsConfig(mode="native"),
+        notification_hub=Hub(),
+    )
+    try:
+        names = {d["function"]["name"] for d in runtime.definitions()}
+        assert "report_to_chat" in names
+    finally:
+        await runtime.close()
