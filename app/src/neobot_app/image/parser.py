@@ -152,7 +152,7 @@ class ImageParseService:
                 description = await self._parse_single_image(seg)
             except Exception as exc:
                 self._logger.error("图片解析失败", error=str(exc))
-                description = "[图片解析失败]"
+                description = ""
             # 替换为解析后的文本段
             segments[index] = _make_text_segment(description)
 
@@ -170,11 +170,13 @@ class ImageParseService:
                 # 拉不到的图不再笼统报「解析失败」：说清是过期，并把以前留过的描述带上，
                 # 让模型知道这张图大概是什么内容（见 image/unavailable.py）。
                 return f"[图片：{expired_inline_text(await describe(expired_key))}]"
-            return "[图片解析失败]"
+            self._logger.warning("图片下载失败，跳过该图片")
+            return ""
 
         image_bytes = _resize_image_if_too_small(image_bytes, logger=self._logger)
         if image_bytes is None:
-            return "[图片:特殊尺寸无法解析]"
+            self._logger.warning("图片尺寸异常，跳过该图片")
+            return ""
 
         file_hash = hashlib.md5(image_bytes).hexdigest()
         # 引用索引：拉不到这张图时靠它回显描述（临时 URL / file id 只以摘要落库）
@@ -193,11 +195,13 @@ class ImageParseService:
 
         # 调用视觉模型
         if self._vision_provider is None:
-            return "[图片解析失败：未配置视觉模型]"
+            self._logger.warning("视觉模型未配置，跳过图片解析（仅记录日志）")
+            return ""
 
         description = await self._call_vision_model(image_bytes)
         if description is None:
-            return "[图片解析失败]"
+            self._logger.warning("视觉模型未返回描述，跳过该图片（仅记录日志）")
+            return ""
 
         # 存入数据库
         if self._analysis is not None:
