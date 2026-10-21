@@ -85,7 +85,7 @@ class BilibiliLiveSkill(SkillModule):
                         "room_id": {"type": "integer", "description": "直播间短号或房间号"},
                         "auto_reply": {
                             "type": "boolean",
-                            "description": "是否自动回复@本账号的弹幕，默认 true",
+                            "description": "是否自动回复本房间所有非空弹幕，默认 true",
                             "default": True,
                         },
                     },
