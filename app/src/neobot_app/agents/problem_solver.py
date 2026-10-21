@@ -528,7 +528,6 @@ class ProblemSolverManager:
         await self._push_notification(task, notification)
 
     async def _on_failed(self, task: SolveTask) -> None:
-        error_text = task.error or "未知错误"
         question_preview = task.question[:200]
         notification = json.dumps(
             {
@@ -537,11 +536,11 @@ class ProblemSolverManager:
                 "status": task.status,
                 "task_id": task.task_id,
                 "question": question_preview,
-                "error": error_text,
+                "error": "解题失败",
                 "next": [
                     {
                         "action": "reply_to_user",
-                        "text": "告知解题失败与原因，并询问是否重试或补充信息",
+                        "text": "告知用户解题失败，请稍后重试或补充信息；不要复述技术错误",
                     }
                 ],
             },
@@ -1100,7 +1099,8 @@ class ProblemSolverToolExecutor(ToolExecutor):
 
     async def _execute_parse_image(self, args: dict) -> str:
         if self._vision_provider is None:
-            return _json({"ok": False, "error": "vision_provider 未配置，无法解析图片"})
+            self._logger.warning("视觉模型未配置，跳过图片解析（仅记录日志）")
+            return _json({"ok": True, "skipped": True, "note": ""})
         from neobot_app.runtime.sandbox_service import detect_file_type
 
         image_path = str(args.get("image_path", "")).strip()
