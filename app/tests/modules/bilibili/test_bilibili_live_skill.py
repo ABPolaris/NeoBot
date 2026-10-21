@@ -68,6 +68,9 @@ def test_skill_exposes_expected_tools() -> None:
         "record_clip",
         "snapshot",
         "transcribe",
+        "get_live_willingness",
+        "set_live_willingness",
+        "remove_live_willingness",
     }
 
 
