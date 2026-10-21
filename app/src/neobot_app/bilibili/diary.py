@@ -1,8 +1,8 @@
-"""B站动态日记 — 把今天聊天/档案里的内容写成一条 B站动态并发布。
+"""B站动态日记 — 把今天群聊摘要写成一条 B站动态并发布。
 
-默认关闭（config.bilibili.dynamic_diary_enabled=false）。生成走一次 LLM 调用，
-素材来源可注入（material_provider，推荐接聊天记录/档案服务）；未注入时退回
-读取档案表里的 group_summary / user_summary 当日条目。
+默认关闭（config.bilibili.dynamic_diary_enabled=false）。日记前 5 分钟刷新摘要，
+只读 group_summary（不读私聊），按上次快照做行级 diff；agent 用 read_diary_material
+分页查看，用 send_dynamic/cancel 决定发布。
 发布只调用 BilibiliClient/BilibiliService.publish_dynamic，不碰 QQ 空间、不回复消息。
 """
 
@@ -11,18 +11,19 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from neobot_app.bilibili._compat import bilibili_config, call_client, get_field
 from neobot_app.bilibili.prompts import build_diary_prompt
-from neobot_app.bilibili.reply_engine import clean_reply
+from neobot_app.bilibili.diary_tools import run_diary_agent
 from neobot_app.skills.base import SkillModule
 from neobot_app.time_context import get_current_time_values, today_local, to_local
 from neobot_app.utils.logger import get_module_logger
 
 logger = get_module_logger("bilibili.diary")
 
-DEFAULT_MATERIAL_TABLES = ("group_summary", "user_summary")
+DEFAULT_MATERIAL_TABLES = ("group_summary",)
 #: 每张档案表最多取多少条当日条目做素材。
 _MAX_ARCHIVE_ITEMS = 20
 #: 单条档案素材最多截取多少字符。
@@ -43,11 +44,13 @@ class BilibiliDiaryService:
         *,
         archive_service: Any = None,
         material_provider: Any = None,
+        data_dir: Path | None = None,
         bot_name: str = "",
         bot_data: str = "",
         enabled: bool = False,
         max_chars: int = 600,
         max_material_chars: int = 6000,
+        requirement: str = "",
         timeout_seconds: float = 60.0,
     ) -> None:
         # client 可以是 BilibiliClient（同步 publish_dynamic）或 BilibiliService（异步门面）。
@@ -55,11 +58,13 @@ class BilibiliDiaryService:
         self._client = client
         self._archive = archive_service
         self._material_provider = material_provider
+        self._data_dir = Path(data_dir) if data_dir is not None else None
         self._bot_name = bot_name
         self._bot_data = bot_data
         self._enabled = bool(enabled)
         self._max_chars = max(1, int(max_chars or 600))
         self._max_material_chars = max(0, int(max_material_chars or 0))
+        self._requirement = str(requirement or "").strip()
         self._timeout_seconds = float(timeout_seconds)
 
     @classmethod
@@ -71,6 +76,7 @@ class BilibiliDiaryService:
         *,
         archive_service: Any = None,
         material_provider: Any = None,
+        data_dir: Path | None = None,
         bot_name: str = "",
         bot_data: str = "",
         **overrides: Any,
@@ -79,10 +85,12 @@ class BilibiliDiaryService:
         values: dict[str, Any] = {
             "archive_service": archive_service,
             "material_provider": material_provider,
+            "data_dir": data_dir,
             "bot_name": bot_name,
             "bot_data": bot_data,
             "enabled": bool(getattr(cfg, "dynamic_diary_enabled", False)),
         }
+        values["requirement"] = str(getattr(cfg, "dynamic_diary_requirement", "") or "")
         values.update(overrides)
         return cls(provider, client, **values)
 
@@ -97,22 +105,39 @@ class BilibiliDiaryService:
     # ── 素材 ──
 
     async def collect_material(self) -> str:
-        """收集今天的聊天/档案素材（material_provider 优先）。"""
-        if self._material_provider is not None:
-            try:
-                material = await call_client(self._material_provider)
-            except Exception as exc:
-                logger.warning("B站日记素材生成失败", error=str(exc))
-                material = ""
-            if material:
-                return str(material).strip()
+        """只收集群聊摘要，并按上次快照做行级 diff；+ 前缀表示今天新增/变化。"""
         return await self._archive_material()
+
+    def _snapshot_path(self) -> Path | None:
+        if self._data_dir is None:
+            return None
+        return self._data_dir / "bilibili" / "diary_material.json"
+
+    def _load_snapshot(self) -> list[str] | None:
+        path = self._snapshot_path()
+        if path is None or not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return [str(item) for item in data] if isinstance(data, list) else None
+
+    def _save_snapshot(self, lines: list[str]) -> None:
+        path = self._snapshot_path()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(lines, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            logger.debug("B站日记素材快照写入失败", path=str(path))
 
     async def _archive_material(self) -> str:
         if self._archive is None:
             return ""
         today = today_local()
-        lines: list[str] = []
+        current: list[str] = []
         for table in DEFAULT_MATERIAL_TABLES:
             try:
                 items = await call_client(
@@ -133,46 +158,51 @@ class BilibiliDiaryService:
                 value = str(get_field(item, "value", "") or "").strip()
                 if not value:
                     continue
-                lines.append(f"[{table}:{key}] {value[:_ARCHIVE_ITEM_CHARS]}")
-        return "\n".join(lines)
+                for line in value.splitlines():
+                    text = line.strip()
+                    if text:
+                        current.append(f"[群:{key}] {text[:_ARCHIVE_ITEM_CHARS]}")
+        previous = self._load_snapshot()
+        if previous is None:
+            added = current
+        else:
+            seen = set(previous)
+            added = [line for line in current if line not in seen]
+        self._save_snapshot(current)
+        return "\n".join(f"+ {line}" for line in added)
 
     # ── 生成与发布 ──
 
     async def generate(self) -> str:
-        """生成动态正文；返回空字符串表示生成失败。"""
+        """生成动态正文；返回空字符串表示生成失败或 agent 决定不写。"""
         if self._provider is None:
             return ""
         material = await self.collect_material()
         date_text = get_current_time_values()["current_date"]
         system, user = build_diary_prompt(
-            material,
+            "",
             date_text=date_text,
             bot_name=self._bot_name,
             bot_data=self._bot_data,
             max_chars=self._max_chars,
             max_material_chars=self._max_material_chars,
+            requirement=self._requirement,
         )
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
         try:
-            chat = self._provider.chat(messages)
-            if self._timeout_seconds > 0:
-                response = await asyncio.wait_for(chat, timeout=self._timeout_seconds)
-            else:
-                response = await chat
+            result = await run_diary_agent(
+                self._provider,
+                system,
+                user,
+                [line for line in material.splitlines() if line],
+                max_chars=self._max_chars,
+                timeout=self._timeout_seconds,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning("B站日记生成失败", error=f"{type(exc).__name__}: {exc}")
             return ""
-        content = (
-            response.get("content")
-            if isinstance(response, dict)
-            else get_field(response, "content", "")
-        )
-        return clean_reply(content, self._max_chars)
+        return result.text or ""
 
     async def publish(self, text: str) -> dict:
         """发布一条文本动态，返回 {ok, dynamic_id, error}。"""
@@ -224,7 +254,7 @@ class BilibiliDiarySkill(SkillModule):
             "B站动态日记 Skill 提供以下能力：\n\n"
             "  publish_bilibili_diary — 生成今天的B站动态并发布；preview=true 时只生成不发布。\n\n"
             "使用前提：B站已登录且已开启动态日记（默认关闭）。"
-            "动态内容只来自聊天/档案摘要，不会读私聊原文，也不会修改QQ空间。"
+            "动态内容只来自群聊摘要（不读私聊），按今天新增/变化做 diff；不会修改QQ空间。"
         )
 
     def reset(self) -> None:
