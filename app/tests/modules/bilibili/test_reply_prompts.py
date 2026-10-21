@@ -302,3 +302,23 @@ def test_comment_and_live_length_requirements_differ() -> None:
     )[0]
     assert "最多20个字" not in live
     assert "弹幕要求" not in live
+
+
+
+def test_diary_prompt_has_cot_and_no_material_dump() -> None:
+    system, user = build_diary_prompt("", date_text="2026-10-20", bot_data="人设")
+
+    assert "这是你今天在QQ聊天的经历" in system
+    assert "可以cancel掉" in system
+    assert "不要写隐私和具体的人名" in system
+    assert "read_diary_material" in system
+    assert "请根据以上素材" not in user
+    assert "2026-10-20" in user
+
+
+
+def test_diary_requirement_is_configurable() -> None:
+    system, _ = build_diary_prompt(
+        "", date_text="2026-10-20", requirement="只写游戏和音乐，不写工作"
+    )
+    assert "<日记要求>只写游戏和音乐，不写工作</日记要求>" in system
