@@ -65,10 +65,12 @@ class BilibiliRuntime:
         logger: Logger | None = None,
         bot_name: str = "",
         bot_data: str = "",
+        prompt_store: Any = None,
     ) -> None:
         self._config = config
         self._logger = logger or NullLogger()
         self._archive_summary_service = archive_summary_service
+        self._archive_service = archive_service
         self._command_service = command_service
         self._started = False
         cfg = getattr(config, "bilibili", None)
@@ -128,7 +130,7 @@ class BilibiliRuntime:
             bot_data=bot_data,
             logger=self._logger,
             cooldown_seconds=float(
-                getattr(cfg, "live_interaction_cooldown_seconds", 20.0) or 0.0
+                getattr(cfg, "live_interaction_cooldown_seconds", 5.0) or 0.0
             ),
             max_reply_chars=int(
                 getattr(cfg, "live_interaction_max_reply_chars", 40) or 40
@@ -141,6 +143,13 @@ class BilibiliRuntime:
             flow_registry=flow_registry,
             mention_names=list(getattr(cfg, "live_interaction_mention_names", None) or []),
             reply_chance=float(getattr(cfg, "live_interaction_reply_chance", 0.5) or 0.5),
+            asr_default_enabled=bool(getattr(cfg, "live_interaction_asr_enabled", False)),
+            prompt_store=prompt_store,
+            auto_look_enabled=bool(getattr(cfg, "live_interaction_auto_look_enabled", False)),
+            auto_look_interval_minutes=int(getattr(cfg, "live_interaction_auto_look_interval_minutes", 30) or 30),
+            screenshot_replies=bool(getattr(cfg, "live_interaction_screenshot_replies", False)),
+            archive_service=archive_service,
+            summary_every=int(getattr(cfg, "live_interaction_summary_every", 200) or 0),
         )
         self.channel = BilibiliCrossChatChannel(
             self.service, self.engine, live_interactor=self.live_interactor
@@ -341,6 +350,19 @@ class BilibiliRuntime:
                 return f"设置失败：{result.get('error') or '未知错误'}"
             return f"直播间 {room_id} 自动回复已{'打开' if action else '关闭'}"
 
+        async def _toggle_asr(ctx: Any) -> str:
+            args = [str(a).strip() for a in (ctx.args or [])]
+            if len(args) < 2:
+                return "用法：/直播ASR <房间号> 开|关"
+            room_id = _digits(args[0])
+            action = _switch(args[1])
+            if room_id <= 0 or action is None:
+                return "房间号或开关参数无效"
+            result = await self.live_interactor.set_asr(room_id, action)
+            if not result.get("ok"):
+                return f"设置失败：{result.get('error') or '未知错误'}"
+            return f"直播间 {room_id} ASR 已{'打开' if action else '关闭'}"
+
         async def _list(ctx: Any) -> str:
             rooms = self.live_interactor.list_rooms()
             if not rooms:
@@ -350,7 +372,8 @@ class BilibiliRuntime:
                 lines.append(
                     f"- {room.get('name') or '(未命名)'}（{room.get('room_id')}，"
                     f"真实房间 {room.get('real_room_id')}，"
-                    f"自动回复{'开' if room.get('auto_reply') else '关'}）"
+                    f"自动回复{'开' if room.get('auto_reply') else '关'}，"
+                    f"ASR{'开' if room.get('asr', True) else '关'}）"
                 )
             return "\n".join(lines)
 
@@ -377,9 +400,16 @@ class BilibiliRuntime:
             ),
             (
                 "直播互动AI",
-                "开关某个直播间的自动回复（只回 @bot）",
+                "开关某个直播间的自动回复",
                 "<房间号> 开|关",
                 _toggle_ai,
+                PERM_SUB_ADMIN,
+            ),
+            (
+                "直播ASR",
+                "开关某个直播间的 ASR 上下文（默认打开）",
+                "<房间号> 开|关",
+                _toggle_asr,
                 PERM_SUB_ADMIN,
             ),
             (
