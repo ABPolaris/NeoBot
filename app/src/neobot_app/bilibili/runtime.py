@@ -18,6 +18,7 @@ from neobot_app.bilibili.diary import BilibiliDiaryService, BilibiliDiarySkill
 from neobot_app.bilibili.live_interact import BilibiliLiveInteractor
 from neobot_app.bilibili.video_frames import VideoFrameService
 from neobot_app.bilibili.media import BilibiliVideoService
+from neobot_app.bilibili.video_tasks import BilibiliVideoTaskManager
 from neobot_app.bilibili.private_monitor import BilibiliPrivateMonitor
 from neobot_app.bilibili.reply_engine import BilibiliReplyEngine
 from neobot_app.bilibili.service import BilibiliService
@@ -54,6 +55,8 @@ class BilibiliRuntime:
         vision_provider: Any = None,
         on_live_event: Any = None,
         willing_service: Any = None,
+        flow_registry: Any = None,
+        notification_hub: Any = None,
         logger: Logger | None = None,
         bot_name: str = "",
         bot_data: str = "",
@@ -70,6 +73,11 @@ class BilibiliRuntime:
             archive_service=archive_service,
             logger=self._logger,
         )
+        self.video_task_manager = BilibiliVideoTaskManager(
+            video_service=self.video_service,
+            notification_hub=notification_hub,
+            logger=self._logger,
+        )
         self.video_frames_service = VideoFrameService(
             self.service,
             vision_provider=vision_provider,
@@ -84,6 +92,7 @@ class BilibiliRuntime:
             bot_name=bot_name,
             bot_uid=0,
             bot_data=bot_data,
+            flow_registry=flow_registry,
         )
         self.comment_monitor = BilibiliCommentMonitor.from_config(
             self.service, self.engine, cfg, data_dir=DATA_DIR
@@ -100,10 +109,16 @@ class BilibiliRuntime:
             bot_data=bot_data,
         )
         self.diary_skill = BilibiliDiarySkill(self.diary)
+        live_bot_name = (
+            str(getattr(cfg, "live_interaction_mention_names", None)[0]).strip()
+            if getattr(cfg, "live_interaction_mention_names", None)
+            else bot_name
+        )
         self.live_interactor = BilibiliLiveInteractor(
             self.service,
             provider=provider,
-            bot_name=bot_name,
+            bot_name=live_bot_name,
+            bot_data=bot_data,
             logger=self._logger,
             cooldown_seconds=float(
                 getattr(cfg, "live_interaction_cooldown_seconds", 20.0) or 0.0
@@ -116,6 +131,9 @@ class BilibiliRuntime:
             vision_provider=vision_provider,
             on_event=on_live_event,
             willing_service=willing_service,
+            flow_registry=flow_registry,
+            mention_names=list(getattr(cfg, "live_interaction_mention_names", None) or []),
+            reply_chance=float(getattr(cfg, "live_interaction_reply_chance", 0.5) or 0.5),
         )
         self.channel = BilibiliCrossChatChannel(
             self.service, self.engine, live_interactor=self.live_interactor
@@ -497,6 +515,7 @@ def build_bilibili_skills(
                 service=runtime.service,
                 video_service=runtime.video_service,
                 archive_service=archive_service,
+                task_manager=runtime.video_task_manager,
             ),
             lambda: BilibiliUserSkill(
                 service=runtime.service,

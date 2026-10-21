@@ -726,3 +726,26 @@ async def test_compression_reads_omitted_middle_page_by_page(env, monkeypatch) -
     assert read_tools
     offsets = [args.get("offset") for name, args in built.executor.calls if name.endswith("read_archive")]
     assert 0 in offsets and -1 in offsets
+
+
+
+async def test_direct_rewrite_fallback_when_tool_loop_does_not_write(env) -> None:
+    compressed = "关键事实: 甲喜欢豆浆\n" + "y" * 1800
+    provider = _ScriptedProvider(
+        [
+            {"role": "assistant", "content": "我读完了", "tool_calls": None},
+            {"role": "assistant", "content": compressed, "tool_calls": None},
+        ]
+    )
+    built = await env(provider=provider)
+    original = "关键事实: 甲喜欢豆浆\n" + "x" * 12000
+    await _seed(built.archive_service, "user_profile", "1", original)
+
+    started = await built.summary.start_manual_compression(
+        "user_profile", "1", target_chars=3000
+    )
+    task = await _run(built.summary, started["task_id"])
+
+    assert task["status"] == "done"
+    stored = await built.archive_service.get("user_profile", "1")
+    assert stored is not None and stored.value == compressed

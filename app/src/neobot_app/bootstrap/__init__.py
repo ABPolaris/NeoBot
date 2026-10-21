@@ -1130,6 +1130,8 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
             vision_provider=vision_provider,
             on_live_event=_notify_live_event,
             willing_service=memory_svcs["willing_service"],
+            flow_registry=chat_flow_registry,
+            notification_hub=notification_hub,
             logger=logger_factory.get_logger("app.bilibili"),
             bot_name=config.bot.nick_name,
             bot_data=config.bot.bot_data,
@@ -1147,6 +1149,10 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
                 logger_factory.get_logger("app.bilibili").exception(
                     f"B站技能注册失败：{getattr(_skill, 'name', _skill)}"
                 )
+        _agent_tools_owner = skill_manager.get("agent_tools")
+        if _agent_tools_owner is not None and hasattr(_agent_tools_owner, "runtime"):
+            _agent_tools_owner.runtime.set_bilibili_tasks(bili_runtime.video_task_manager)
+
         _cross_chat = skill_manager.get("cross_chat")
         if _cross_chat is not None and callable(
             getattr(_cross_chat, "set_bilibili_channel", None)

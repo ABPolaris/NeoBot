@@ -17,6 +17,8 @@ from __future__ import annotations
 from typing import Any
 
 from neobot_app.bilibili._compat import call_client, get_field, resolve_client
+from neobot_app.bilibili.prompts import MAX_LIVE_DANMAKU_CHARS
+from neobot_app.bilibili.reply_engine import clean_reply
 from neobot_app.utils.logger import get_module_logger
 
 logger = get_module_logger("bilibili.channel")
@@ -120,9 +122,12 @@ class BilibiliCrossChatChannel:
         content = str(task or "")
         if frame_context:
             content += f"\n[当前直播画面]\n{frame_context}"
-        reply = await self._engine.generate_task_reply(content, history=history)
+        reply = await self._engine.generate_task_reply(content, history=history, live=True)
         if reply is None:
             return False, "", "B站侧决定不回应这个任务"
+        reply = clean_reply(reply, MAX_LIVE_DANMAKU_CHARS)
+        if not reply:
+            return False, "", "B站弹幕为空"
         result = await self._live.send_danmaku(room_id, reply)
         if not result.get("ok"):
             detail = str(result.get("error") or "B站直播弹幕发送失败")

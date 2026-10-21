@@ -13,7 +13,7 @@ covers:
   - app/src/neobot_app/runtime/process_stop.py
   - app/src/neobot_app/runtime/connection_readiness.py
 verified_against: 56559c2
-verified_hash: b28cd10f288b
+verified_hash: 20334809be99
 ---
 
 # 01 启动装配 / 停机 / 软重启 / 待机

@@ -55,14 +55,9 @@ def test_comment_system_prompt_has_bilibili_rules() -> None:
     system, _ = build_comment_prompt(_comment_context())
 
     assert "<你是谁>" in system
-    assert "B站" in system
-    assert "不是QQ" in system
+    assert "<场景>这是B站评论区。</场景>" in system
+    assert "<活人感增强>" in system
     assert "不懂装懂" in system
-    assert "听着xx" in system
-    assert "实际上xx" in system
-    assert "调调" in system
-    assert "[SKIP]" in system
-    assert "楼中楼" in system
 
 
 def test_comment_user_prompt_renders_target_and_tree() -> None:
@@ -152,7 +147,7 @@ def test_task_prompt_contains_task_and_history() -> None:
     )
 
     assert "跨聊天任务" in system
-    assert "[SKIP]" in system
+    assert "cancel" in system
     assert "告诉对方明天集合" in user
     assert "对方:你好" in user
 
@@ -203,3 +198,107 @@ def test_private_prompt_renders_video_context() -> None:
     assert "<相关视频>" in user
     assert "私信里的视频" in user
     assert "语音转写" in user
+
+
+
+def test_live_danmaku_prompt_uses_blocks_and_twenty_chars() -> None:
+    from neobot_app.bilibili.prompts import (
+        LiveDanmakuContext,
+        build_live_danmaku_prompt,
+        build_live_scheduled_prompt,
+    )
+
+    ctx = LiveDanmakuContext(
+        bot_name="是弥音哦",
+        room_name="测试直播间",
+        viewer_name="观众",
+        text="在吗",
+        recent_history="[21:00] 观众: 在吗",
+        frame_context="画面里在打游戏",
+    )
+    system, user = build_live_danmaku_prompt(ctx)
+    assert "<直播场景>这是B站直播间。</直播场景>" in system
+    assert "弹幕要求" not in system
+    assert "最多20个字" not in system
+    assert "<你是谁>" in system
+    assert "是弥音哦" in system
+    assert "观众" in user and "在吗" in user
+    assert "画面里在打游戏" in user
+
+    system, user = build_live_scheduled_prompt(ctx)
+    assert "<主动弹幕>" in system
+    assert "是弥音哦" in system
+    assert "在吗" in user
+
+
+
+def test_bili_human_feel_matches_qq() -> None:
+    import tomllib
+    from neobot_app.bilibili.prompts import BILI_HUMAN_FEEL
+
+    with open(
+        "app/src/neobot_app/prompt/templates/prompts.toml", "rb"
+    ) as handle:
+        qq = tomllib.load(handle)["human_feel"]["template"]
+    assert BILI_HUMAN_FEEL.strip() == qq.strip()
+
+
+
+def test_bilibili_prompts_include_configured_bot_data() -> None:
+    from dataclasses import replace
+
+    from neobot_app.bilibili.prompts import (
+        LiveDanmakuContext,
+        PrivateMessageContext,
+        build_diary_prompt,
+        build_live_danmaku_prompt,
+        build_live_scheduled_prompt,
+        build_task_prompt,
+    )
+
+    marker = "唯一人设标记-9f3c"
+    assert marker in build_comment_prompt(replace(_comment_context(), bot_data=marker))[0]
+    private = PrivateMessageContext(bot_name="Neo", bot_data=marker)
+    assert marker in build_private_prompt(private)[0]
+    assert marker in build_task_prompt("任务", bot_data=marker)[0]
+    assert marker in build_diary_prompt("素材", date_text="2026-10-20", bot_data=marker)[0]
+    live = LiveDanmakuContext(bot_name="弥音", bot_data=marker, text="在吗")
+    assert marker in build_live_danmaku_prompt(live)[0]
+    assert marker in build_live_scheduled_prompt(live)[0]
+
+
+
+def test_bili_prompts_do_not_use_qq_only_instructions() -> None:
+    from neobot_app.bilibili.prompts import (
+        LiveDanmakuContext,
+        build_comment_prompt,
+        build_live_danmaku_prompt,
+    )
+
+    comment = build_comment_prompt(_comment_context())[0]
+    live = build_live_danmaku_prompt(
+        LiveDanmakuContext(bot_name="Neo", bot_data="人设", text="在吗")
+    )[0]
+    for system in (comment, live):
+        assert "send_long_reply" not in system
+        assert "[msg_id=" not in system
+
+
+
+def test_comment_and_live_length_requirements_differ() -> None:
+    from neobot_app.bilibili.prompts import (
+        LiveDanmakuContext,
+        build_comment_prompt,
+        build_live_danmaku_prompt,
+    )
+
+    comment = build_comment_prompt(_comment_context())[0]
+    assert "请回复的平淡一些" in comment
+    assert "最多20个字" not in comment
+    assert "弹幕要求" not in comment
+
+    live = build_live_danmaku_prompt(
+        LiveDanmakuContext(bot_name="Neo", bot_data="人设", text="在吗")
+    )[0]
+    assert "最多20个字" not in live
+    assert "弹幕要求" not in live

@@ -61,7 +61,7 @@ class BilibiliLiveSkill(SkillModule):
                 {
                     "properties": {
                         "room_id": {"type": "integer", "description": "直播间短号或房间号"},
-                        "text": {"type": "string", "description": "弹幕内容，尽量短"},
+                        "text": {"type": "string", "description": "弹幕正文；B站硬限制20字，一句说完，不带QQ群号/客服腔/markdown/@/链接/颜文字"},
                     },
                     "required": ["room_id", "text"],
                 },

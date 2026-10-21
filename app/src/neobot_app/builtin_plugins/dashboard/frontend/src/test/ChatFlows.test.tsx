@@ -1,7 +1,7 @@
 // ChatFlows.test.tsx —— 聊天流页（spec(3) 建立 / spec(10) 改纯内存）：display_name、
 // 完整提示词（未截断）、逐份 diff 与图片哈希、历史切换、清空、快速预览
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ChatFlows from '../pages/ChatFlows';
 import { api } from '../api/endpoints';
@@ -30,6 +30,13 @@ const LONG_TEXT = 'y'.repeat(4500);
 /** 假定时器下把已排队的微任务链冲干净（组合请求是 await 两次） */
 async function flushPromises(): Promise<void> {
   for (let i = 0; i < 20; i += 1) await Promise.resolve();
+}
+
+/** 默认是内存快照；需要看完整提示词时先切到「完整提示词」tab。 */
+async function openFullTab(): Promise<void> {
+  await screen.findByText(/共 7 条，快照只保留最近 3 条/);
+  fireEvent.click(screen.getByRole('tab', { name: /完整提示词/ }));
+  await screen.findByText('完整的系统提示词');
 }
 
 /** 假定时器下等待 React 把「取数 → 状态更新 → effect（含新 key 的取数）」跑完 */
@@ -187,26 +194,23 @@ describe('ChatFlows', () => {
     expect(screen.getByText('1 小时前')).toBeInTheDocument();
   });
 
-  it('默认展示最新一份完整提示词，且完整内容不截断', async () => {
+  it('默认展示内存快照（快速预览），而不是历史备份', async () => {
     render(<ChatFlows />);
 
-    // 默认按当前聊天流过滤，进入页面即请求最新一份
-    await waitFor(() => expect(chatFlowPromptLatest).toHaveBeenCalledWith('group:888'));
-    // 最新那一份不再重复请求全量接口（已随列表一起读回）
-    expect(chatFlowPrompt).not.toHaveBeenCalled();
-
-    expect(await screen.findByText('完整的系统提示词')).toBeInTheDocument();
-    expect(screen.getByText(/^y{4500}$/)).toBeInTheDocument();
-    expect(screen.getByText(/messages（3 条，完整未截断）/)).toBeInTheDocument();
-    expect(screen.getAllByText(/迭代 2/).length).toBeGreaterThan(0);
-    // 历史列表默认选中最新一份（#8）
-    expect(screen.getByRole('button', { name: /#8/ })).toHaveAttribute('aria-current', 'true');
+    await waitFor(() => expect(chatFlowDetail).toHaveBeenCalledWith('group:888'));
+    expect((await screen.findAllByText('系统提示词原文')).length).toBeGreaterThan(0);
+    expect(screen.getByRole('tab', { name: /快速预览/ })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('send_reply')).toBeInTheDocument();
+    expect(screen.getByText(/共 7 条，快照只保留最近 3 条/)).toBeInTheDocument();
   });
 
   it('每 5 秒自动跟随最新一份：一轮结束后换成该轮最后一份提示词（无需手动刷新）', async () => {
     vi.useFakeTimers();
     try {
       render(<ChatFlows />);
+      await settle();
+      expect(screen.getByText(/共 7 条，快照只保留最近 3 条/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('tab', { name: /完整提示词/ }));
       await settle();
       expect(screen.getByText('完整的系统提示词')).toBeInTheDocument();
 
@@ -240,7 +244,7 @@ describe('ChatFlows', () => {
   it('手动翻到更早的一份时停在那一份，可一键回到最新', async () => {
     const user = userEvent.setup();
     render(<ChatFlows />);
-    await screen.findByText('完整的系统提示词');
+    await openFullTab();
 
     await user.click(screen.getByRole('button', { name: /#7/ }));
     await screen.findByText('更早一份的完整提示词');
@@ -255,7 +259,7 @@ describe('ChatFlows', () => {
   it('切换到历史里的其它份时才请求全量接口', async () => {
     const user = userEvent.setup();
     render(<ChatFlows />);
-    await screen.findByText('完整的系统提示词');
+    await openFullTab();
 
     await user.click(screen.getByRole('button', { name: /#7/ }));
 
@@ -266,7 +270,7 @@ describe('ChatFlows', () => {
   it('保留「最近 80 条快速预览」：不读盘、来自内存快照', async () => {
     const user = userEvent.setup();
     render(<ChatFlows />);
-    await screen.findByText('完整的系统提示词');
+    await screen.findByText(/共 7 条，快照只保留最近 3 条/);
 
     await user.click(screen.getByRole('tab', { name: /快速预览/ }));
 
@@ -279,7 +283,7 @@ describe('ChatFlows', () => {
   it('清空提示词历史需要二次确认（勾选后才能提交）', async () => {
     const user = userEvent.setup();
     render(<ChatFlows />);
-    await screen.findByText('完整的系统提示词');
+    await screen.findByText(/共 7 条，快照只保留最近 3 条/);
 
     await user.click(screen.getByRole('button', { name: /清空提示词历史/ }));
 
@@ -295,7 +299,7 @@ describe('ChatFlows', () => {
 
   it('文案说明纯内存 + 逐份 diff + 图片哈希，并保留隐私提示', async () => {
     render(<ChatFlows />);
-    await screen.findByText('完整的系统提示词');
+    await screen.findByText(/共 7 条，快照只保留最近 3 条/);
 
     expect(screen.getByText(/完整提示词也只存在内存里/)).toBeInTheDocument();
     expect(screen.getByText(/逐份只存相对上一份的 diff/)).toBeInTheDocument();
@@ -305,7 +309,7 @@ describe('ChatFlows', () => {
 
   it('历史列表展示完整篇幅与逐份驻留成本', async () => {
     render(<ChatFlows />);
-    await screen.findByText('完整的系统提示词');
+    await openFullTab();
 
     expect(screen.getByText(/常驻 6\.0 KB/)).toBeInTheDocument();
     expect(screen.getByText(/驻留 512 B/)).toBeInTheDocument();

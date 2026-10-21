@@ -81,6 +81,8 @@ class WillingService:
         name: str,
         text: str,
         observed_messages: tuple[str, ...] = (),
+        extra_bot_names: tuple[str, ...] = (),
+        base_probability: float | None = None,
     ) -> WillingDecision:
         """直播弹幕的意愿判断（和群聊同一套 manager/系数/被@必回规则）。
 
@@ -96,7 +98,8 @@ class WillingService:
             message=[MessageSegment(type="text", data={"text": text})],
             raw_message=text,
         )
-        mentioned = self._called_bot_name(text)
+        names = (self._config.bot.nick_name, *(self._config.bot.alias_name or []), *extra_bot_names)
+        mentioned = any(name and str(name).casefold() in text.casefold() for name in names)
         reply_mode = str(getattr(self._config.chat, "reply_mode", "agent") or "agent")
         config_global_coeff = (
             self._config.chat.willing_agent_global_coefficient
@@ -116,7 +119,11 @@ class WillingService:
             queue_text="",
             observe_window=max(1, int(self._config.willing.observe_window)),
             observed_messages_text=tuple(observed_messages),
-            base_probability=self._base_probability("group"),
+            base_probability=(
+                max(0.0, min(1.0, float(base_probability)))
+                if base_probability is not None
+                else self._base_probability("group")
+            ),
             conversation_coefficient=1.0,
             bot_account=int(self._config.bot.account),
             bot_name=self._config.bot.nick_name,

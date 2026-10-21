@@ -59,6 +59,7 @@ class AgentToolRuntime:
         from neobot_app.agent_tools.state import StateTools
         from neobot_app.agent_tools.web import WebTools
         from neobot_app.runtime.agent_file_tools import AgentFileTools
+        from neobot_app.agent_tools.bilibili_tasks import ChatReportTools
 
         self.config = config or AgentToolsConfig()
         self.mode = resolve_mode(self.config.mode, ptc_enabled=self.config.ptc_enabled)
@@ -104,6 +105,12 @@ class AgentToolRuntime:
             modules.append(self.children)
         if self.config.lsp_enabled:
             modules.append(self.lsp)
+        if notification_hub is not None:
+            self._report_tools = ChatReportTools(notification_hub)
+            for definition in self._report_tools.definitions():
+                name = definition["function"]["name"]
+                self._definitions[name] = definition
+                self._modules[name] = self._report_tools
         self._definitions: dict[str, dict] = {}
         for module in modules:
             for definition in module.definitions():
@@ -122,6 +129,20 @@ class AgentToolRuntime:
         self._definitions["skill"] = tool_definition("skill", "Load an existing NeoBot skill's instructions. Does not grant additional tools or permissions.",
                                                         {"name": {"type": "string"}}, ["name"])
         self._validators = {name: Draft202012Validator(d["function"]["parameters"]) for name, d in self._definitions.items()}
+
+    def set_bilibili_tasks(self, manager: Any) -> None:
+        """注入 B站后台视频解析；子 agent 与主 agent 共用该工具。"""
+        from neobot_app.agent_tools.bilibili_tasks import BilibiliTaskTools
+
+        module = BilibiliTaskTools(manager)
+        for definition in module.definitions():
+            name = definition["function"]["name"]
+            self._definitions[name] = definition
+            self._modules[name] = module
+        self._validators = {
+            name: Draft202012Validator(d["function"]["parameters"])
+            for name, d in self._definitions.items()
+        }
 
     def workspace(self, context: ToolContext) -> Path:
         if not isinstance(context, ToolContext):
@@ -188,7 +209,12 @@ class AgentToolRuntime:
             raise AgentToolError("CLOSED", "Agent tools have been closed")
         if not isinstance(context, ToolContext):
             raise AgentToolError("CONTEXT_REQUIRED", "Model-supplied context is not accepted")
-        if context.allowed_tools is not None and name not in context.allowed_tools:
+        child_safe = {"bilibili_watch_video", "report_to_chat"}
+        if (
+            context.allowed_tools is not None
+            and name not in context.allowed_tools
+            and not (context.parent_agent_id is not None and name in child_safe)
+        ):
             raise AgentToolError("TOOL_DENIED", "Tool is outside the inherited skill allowlist")
         # direct=True 只由宿主在「自己决定呈现方式」的入口传入(主回复管线的按需工具包):
         # 任务工具模式决定的是任务型 Agent 的编排方式,不应反过来限制宿主直接调用叶子工具。
@@ -341,7 +367,10 @@ class AgentToolRuntime:
 
         class Executor:
             def definitions(self) -> list[dict]:
-                return runtime.definitions(allowed_tools=context.allowed_tools)
+                scope = context.allowed_tools
+                if scope is not None:
+                    scope = frozenset(scope) | {"bilibili_watch_video", "report_to_chat"}
+                return runtime.definitions(allowed_tools=scope)
 
             async def execute(self, name: str, args: dict) -> str:
                 try:

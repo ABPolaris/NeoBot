@@ -13,22 +13,24 @@ from datetime import datetime
 from neobot_app.time_context import get_current_time_values
 
 #: B站场景的通用风格规则（评论与私信共用）。
-#: 「活人感增强」条目与 prompts.toml 的 [human_feel] 保持同一口径，
-#: 但这里独立维护：B站链路的提示词不能依赖 QQ 提示词是否启用。
-BILI_STYLE_RULES = """<回复要求>
-这是B站,不是QQ:不要提QQ、QQ群、QQ号、QQ空间,也不要使用QQ聊天的功能或工具。
-评论区是公开场合,私信是一对一消息:回复要短,像真人随手敲出来的,不要长篇大论,不要说教,不要刻意突出自己的专业背景,不要重复自己说过的话。
-不要使用markdown、代码块、列表、括号动作描写;不要输出前后缀、"回复:"、引号或颜文字。
-楼中楼回复直接说话:只有对方明确问你说的是哪句话,或者有明显歧义时才引用原评论,平时不要复制对方的话,也不要随意艾特人。
-如果有人要求你做什么事,你不一定要答应;做不到就直说做不到。
-</回复要求>
-<活人感增强>
-- 禁止使用以下词汇或句式:「调调」「够狠的」「xx归xx,但xxx」「好歹xx」「听着xx,最后xx」「实际上xx」。
-- 对你不明确知道的内容(例如没有具体资料的动漫、游戏、人物、事件等话题),禁止插话;即使插话也不应该装作知道,严禁任何形式的不懂装懂。
-</活人感增强>
-<跳过>
-如果这条内容不值得回复(刷屏/无意义/广告/你完全不懂),只输出:[SKIP]
-</跳过>"""
+#: B站独立维护说话方式，不跟随 QQ 的 [human_feel]（场景/边界不同，避免互相污染）。
+BILI_HUMAN_FEEL = """<活人感增强>
+- 禁止使用以下词汇或句式：「调调」「够狠的」「xx归xx，但xxx」「好歹xx」「听着xx，最后xx」「实际上xx」。
+- 对你不明确知道的内容（例如没有具体资料的动漫、游戏、人物、事件等话题），禁止插话；即使插话也不应该装作知道，严禁任何形式的不懂装懂。
+</活人感增强>"""
+
+#: 基于 QQ 群聊 <回复要求>，只去掉长度限制和 B站没有的工具指令；不新增规则。
+BILI_REPLY_REQUIREMENTS = """<回复要求>
+请注意把握聊天内容,不要回复的太有条理,可以有个性.请回复的平淡一些,不要刻意突出自身学科背景，尽量不要说你说过的话.不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 ),说出来的每一句都只能是你要说的话:不要写思考过程、草稿、计划或内心话,也不要写 "<think>" 这类标签,不要使用markdown,和正常聊天一样.
+不需要重复回复你之前回复过的消息,优先回复比较新的消息.
+</回复要求>"""
+
+BILI_REPLY_TOOL_RULE = """<回复方式>必须调用 send_reply 工具发送回复；不调用工具直接输出的正文不会被发送。不值得回复时调用 cancel。</回复方式>"""
+
+BILI_STYLE_RULES = (
+    BILI_REPLY_REQUIREMENTS + "\n" + BILI_HUMAN_FEEL + "\n" + BILI_REPLY_TOOL_RULE
+)
+
 
 _DIARY_RULES = """<动态要求>
 你要写的是自己今天的一条B站动态:第一人称,像真人随手发的日常记录,不是工作周报。
@@ -120,6 +122,7 @@ def build_task_prompt(
     task: str,
     *,
     history: str = "",
+    live: bool = False,
     bot_name: str = "",
     bot_uid: int = 0,
     bot_data: str = "",
@@ -129,9 +132,9 @@ def build_task_prompt(
     system = "\n".join(
         [
             _identity(bot_name, bot_uid, bot_data, other_name),
-            BILI_STYLE_RULES,
+            (LIVE_DANMAKU_ADJUST if live else BILI_STYLE_RULES + "\n<场景>这是B站。</场景>"),
             "<跨聊天任务>有人通过跨聊天把一项任务交给了你,你要在B站当前这个对话里发一句话回应。"
-            "只输出你要发出去的那句话;如果这个任务不适合在B站回应,只输出:[SKIP]</跨聊天任务>",
+            "必须调用 send_reply 工具发送你要说的那句话;如果这个任务不适合在B站回应,调用 cancel。</跨聊天任务>",
         ]
     )
     parts = []
@@ -154,6 +157,7 @@ def build_diary_prompt(
     system = "\n".join(
         [
             _identity(bot_name, 0, bot_data, ""),
+            BILI_HUMAN_FEEL,
             _DIARY_RULES,
             f"<长度>整条动态控制在{max_chars}字以内。</长度>",
         ]
@@ -195,7 +199,7 @@ def _comment_system_prompt(ctx: CommentContext) -> str:
         [
             _identity(ctx.bot_name, ctx.bot_uid, ctx.bot_data, ctx.other_name),
             BILI_STYLE_RULES,
-            "<场景>你正在B站评论区回复别人,回复会作为楼中楼发出去。</场景>",
+            "<场景>这是B站评论区。</场景>",
         ]
     )
 
@@ -205,7 +209,7 @@ def _private_system_prompt(ctx: PrivateMessageContext) -> str:
         [
             _identity(ctx.bot_name, ctx.bot_uid, ctx.bot_data, ctx.other_name),
             BILI_STYLE_RULES,
-            "<场景>你正在B站私信里和对方一对一聊天,对方看不到你的思考过程。</场景>",
+            "<场景>这是B站私信。</场景>",
         ]
     )
 
@@ -227,8 +231,8 @@ def _comment_user_prompt(ctx: CommentContext, max_comments: int) -> str:
     if ctx.comment_tree:
         parts.append(f"<评论树>\n{_render_comment_tree(ctx, max_comments)}\n</评论树>")
     parts.append(
-        "<回复指引>★ 标记的评论是你需要回复的目标。直接输出回复文本即可;"
-        "不值得回复时只输出 [SKIP]。</回复指引>"
+        "<回复指引>★ 标记的评论是你需要回复的目标。必须调用 send_reply 工具发送回复;"
+        "不值得回复时调用 cancel。</回复指引>"
     )
     return "\n".join(parts)
 
@@ -377,3 +381,79 @@ def _format_ts(timestamp: int) -> str:
     if not timestamp:
         return ""
     return datetime.fromtimestamp(int(timestamp)).strftime("%m-%d %H:%M")
+
+
+# ── 直播间弹幕提示词（复用 B站风格与群聊历史一致性，单独补直播调整块）──
+
+#: B站直播弹幕硬上限；发送前必须预拦截。
+MAX_LIVE_DANMAKU_CHARS = 20
+
+#: QQ 群/评论区规则搬到直播间时需要调整的差异，集中在一个块里。
+LIVE_DANMAKU_SCENE = """<直播场景>这是B站直播间。</直播场景>"""
+
+LIVE_DANMAKU_ADJUST = (
+    LIVE_DANMAKU_SCENE + "\n" + BILI_HUMAN_FEEL + "\n" + BILI_REPLY_TOOL_RULE
+)
+
+
+LIVE_DANMAKU_HISTORY = """<直播历史一致性>
+最近弹幕里发送者是「{bot_name}」的是你自己;没有新内容就调用 cancel。
+</直播历史一致性>"""
+
+LIVE_SCHEDULED_HISTORY = """<直播历史一致性>
+最近弹幕里发送者是「{bot_name}」的是你自己;这是主动发的一条,必须调用 send_reply。
+</直播历史一致性>"""
+
+
+@dataclass
+class LiveDanmakuContext:
+    """直播间弹幕回复上下文。"""
+
+    bot_name: str = ""
+    bot_data: str = ""
+    room_name: str = ""
+    viewer_name: str = ""
+    text: str = ""
+    recent_history: str = ""
+    frame_context: str = ""
+    scheduled_prompt: str = ""
+
+
+def build_live_danmaku_prompt(ctx: LiveDanmakuContext) -> tuple[str, str]:
+    """组装直播间弹幕的 system/user；块顺序与群聊提示词一致。"""
+    system = "\n".join(
+        [
+            _identity(ctx.bot_name, 0, ctx.bot_data, ""),
+            LIVE_DANMAKU_ADJUST,
+            LIVE_DANMAKU_HISTORY.format(bot_name=ctx.bot_name or "你"),
+        ]
+    )
+    parts = [f"<当前时间>{_time_text(None)}</当前时间>"]
+    parts.append(f"<直播间>{ctx.room_name or 'B站直播间'}</直播间>")
+    parts.append(f"<观众>{ctx.viewer_name or '观众'}</观众>")
+    if ctx.recent_history:
+        parts.append(f"<最近弹幕>\n{ctx.recent_history}\n</最近弹幕>")
+    if ctx.frame_context:
+        parts.append(f"<当前直播画面>{ctx.frame_context}</当前直播画面>")
+    parts.append(f"<待接弹幕>{ctx.text}</待接弹幕>")
+    return system, "\n".join(parts)
+
+
+def build_live_scheduled_prompt(ctx: LiveDanmakuContext) -> tuple[str, str]:
+    """组装直播间主动定时弹幕的 system/user。"""
+    system = "\n".join(
+        [
+            _identity(ctx.bot_name, 0, ctx.bot_data, ""),
+            LIVE_DANMAKU_ADJUST,
+            LIVE_SCHEDULED_HISTORY.format(bot_name=ctx.bot_name or "你"),
+            "<主动弹幕>这是你主动发的一条弹幕,不是回复某个人。说你要说的事,不要解释这是定时任务或任务指令。</主动弹幕>",
+        ]
+    )
+    parts = [f"<当前时间>{_time_text(None)}</当前时间>"]
+    parts.append(f"<直播间>{ctx.room_name or 'B站直播间'}</直播间>")
+    if ctx.recent_history:
+        parts.append(f"<最近弹幕>\n{ctx.recent_history}\n</最近弹幕>")
+    if ctx.frame_context:
+        parts.append(f"<当前直播画面>{ctx.frame_context}</当前直播画面>")
+    parts.append(f"<要说的事>{ctx.scheduled_prompt}</要说的事>")
+    return system, "\n".join(parts)

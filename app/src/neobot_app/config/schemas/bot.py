@@ -1776,12 +1776,30 @@ class Bilibili:
         metadata={"description": "直播间自动回复同房间冷却（秒）"},
     )
     live_interaction_max_reply_chars: int = field(
-        default=40,
+        default=20,
         metadata={"description": "直播间弹幕回复最大字符数"},
     )
     live_interaction_at_only: bool = field(
         default=True,
         metadata={"description": "直播间是否只回复 @bot 的弹幕（关闭后会对所有弹幕回复，慎用）"},
+    )
+    live_interaction_mention_names: Optional[List[str]] = field(
+        default_factory=list,
+        metadata={
+            "description": (
+                "直播间 @ 识别额外名单（B站昵称/曾用名等）；会自动加入 B站登录账号 uname，"
+                "用于把含 @ 的弹幕识别为对 bot 的提及。"
+            )
+        },
+    )
+    live_interaction_reply_chance: float = field(
+        default=0.5,
+        metadata={
+            "description": (
+                "直播间普通弹幕的基础回复概率（0-1）；被@/叫名字仍按 at_mention_guaranteed_reply 必回。"
+                "默认 0.5，最终概率还会乘群聊意愿系数。"
+            )
+        },
     )
     live_event_notify_targets: Optional[List[str]] = field(
         default_factory=list,

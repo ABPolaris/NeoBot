@@ -2445,7 +2445,15 @@ class DashboardApi:
                     getter = getattr(service, "get_group_name", None)
                 elif kind in {"private", "friend"}:
                     getter = getattr(service, "get_user_name", None)
-            if callable(getter):
+            if kind == "bilibili_live":
+                name = f"B站直播间 {conversation_id}"
+            elif kind == "bilibili_comment":
+                name = f"B站评论 {conversation_id}"
+            elif kind == "bilibili_private":
+                name = f"B站私信 {conversation_id}"
+            elif kind == "bilibili_task":
+                name = "B站跨聊天任务"
+            elif callable(getter):
                 name = str(await getter(conversation_id) or "").strip()
         except Exception as exc:
             self.logger.debug(f"聊天流名称解析失败，回落 pipeline_key: {key} {exc}")

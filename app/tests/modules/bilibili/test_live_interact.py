@@ -71,11 +71,24 @@ class _FakeProvider:
         self.raises = raises
         self.messages: list[list[dict]] = []
 
-    async def chat(self, messages: list[dict]) -> dict:
+    async def chat(self, messages: list[dict], tools=None) -> dict:
         self.messages.append(messages)
         if self.raises:
             raise RuntimeError("模型炸了")
-        return {"content": self.content}
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "send_reply",
+                        "arguments": json.dumps({"text": self.content}, ensure_ascii=False),
+                    },
+                }
+            ],
+        }
 
 
 async def _enabled(
@@ -190,10 +203,16 @@ async def test_at_filter_generates_and_sends(tmp_path: Path) -> None:
     interactor, client, _ = await _enabled(tmp_path, provider=provider)
     await interactor._handle_danmu("5440", {"uid": 8, "name": "观众", "text": "@小助手 唱首歌"})
     assert client.sent == [(5440, "在呢")]
-    system, user = provider.messages[0]
+    messages = provider.messages[0]
+    system = next(item for item in messages if item.get("role") == "system")
+    user = next(item for item in messages if item.get("role") == "user")
     assert system["role"] == "system"
-    assert "极短" in system["content"]
-    assert user == {"role": "user", "content": "@小助手 唱首歌"}
+    assert "<直播场景>这是B站直播间。</直播场景>" in system["content"]
+    assert "最多20个字" not in system["content"]
+    assert "<活人感增强>" in system["content"]
+    assert user["role"] == "user"
+    assert "@小助手 唱首歌" in user["content"]
+    assert "最近弹幕" in user["content"]
 
     await interactor._handle_danmu("5440", {"uid": 8, "name": "观众", "text": "随便说"})
     assert client.sent == [(5440, "在呢")]
@@ -663,7 +682,10 @@ async def test_reply_chain_captures_frame_context(tmp_path: Path) -> None:
     await interactor._handle_danmu("5440", {"uid": 9, "name": "观众", "text": "在吗"})
     assert media.captures == [5440]
     assert client.sent == [(5440, "欢迎")]
-    assert "主播正在挥手" in provider.messages[-1][-1]["content"]
+    last_user = next(
+        item for item in reversed(provider.messages[-1]) if item.get("role") == "user"
+    )
+    assert "主播正在挥手" in last_user["content"]
 
 
 async def _async_value(value):
@@ -707,3 +729,52 @@ async def test_live_auto_reply_skips_when_willingness_denies(tmp_path: Path) -> 
 
     await interactor._handle_danmu("5440", {"uid": 9, "name": "观众", "text": "在吗"})
     assert client.sent == []
+
+
+
+def test_mention_aliases_are_used_for_at_detection(tmp_path: Path) -> None:
+    interactor = BilibiliLiveInteractor(
+        None,
+        bot_name="QQ名",
+        data_dir=tmp_path,
+        mention_names=["B站小号"],
+    )
+    assert interactor._mentions_bot("@B站小号 在吗") is True
+    assert interactor._mentions_bot("@别人 在吗") is False
+
+
+
+class _FakeFlowRegistry:
+    def __init__(self) -> None:
+        self.prompts: list[tuple] = []
+        self.requests: list[tuple] = []
+
+    def record_prompt(self, key, **kwargs):
+        self.prompts.append((key, kwargs))
+
+    def record_request(self, key, **kwargs):
+        self.requests.append((key, kwargs))
+
+
+async def test_live_reply_records_flow_registry(tmp_path: Path) -> None:
+    provider = _FakeProvider("欢迎")
+    interactor, _client, _ = await _enabled(tmp_path, provider=provider, at_only=False)
+    registry = _FakeFlowRegistry()
+    interactor._flow_registry = registry
+
+    await interactor._handle_danmu("5440", {"uid": 9, "name": "观众", "text": "在吗"})
+
+    assert registry.prompts and registry.prompts[0][0] == "bilibili_live:5440"
+    assert registry.requests and registry.requests[0][1]["messages"]
+
+
+
+async def test_reply_is_capped_to_twenty_chars(tmp_path: Path) -> None:
+    provider = _FakeProvider("这是一条非常非常非常长的直播弹幕回复超过二十个字了")
+    interactor, client, _ = await _enabled(tmp_path, provider=provider, at_only=False)
+    await interactor._handle_danmu("5440", {"uid": 9, "name": "观众", "text": "随便说"})
+    assert client.sent
+    assert len(client.sent[0][1]) <= 20
+    messages = provider.messages[0]
+    system = next(item for item in messages if item.get("role") == "system")
+    assert "<直播场景>这是B站直播间。</直播场景>" in system["content"]

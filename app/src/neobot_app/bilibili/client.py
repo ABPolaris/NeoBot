@@ -50,6 +50,7 @@ _VIDEO_SHARE_URL = f"{API_BASE}/x/web-interface/share/add"
 _FAV_FOLDER_LIST_URL = f"{API_BASE}/x/v3/fav/folder/created/list-all"
 _FAV_RESOURCE_DEAL_URL = f"{API_BASE}/x/v3/fav/resource/deal"
 _RELATION_MODIFY_URL = f"{API_BASE}/x/relation/modify"
+MAX_LIVE_DANMAKU_CHARS = 20
 _COMMENT_ACTION_URL = f"{API_BASE}/x/v2/reply/action"
 
 LIVE_API_BASE = "https://api.live.bilibili.com"
@@ -801,6 +802,11 @@ class BilibiliClient:
         message = (text or "").strip()
         if room_id <= 0 or not message:
             self._logger.warning("B站直播弹幕参数不完整（room_id/text 不能为空）")
+            return False
+        if len(message) > MAX_LIVE_DANMAKU_CHARS:
+            self._logger.warning(
+                f"B站直播弹幕超过 {MAX_LIVE_DANMAKU_CHARS} 字，已拦截发送"
+            )
             return False
         if not self._sessdata or not self._bili_jct:
             self._logger.warning("B站直播弹幕发送失败：未登录")
