@@ -399,6 +399,10 @@ LIVE_DANMAKU_ADJUST = (
 )
 
 
+LIVE_REPLY_TO_RULE = """<回复对象>
+发送时可传 reply_to = 弹幕行首的 [uid=...] 数字，B站会 @ 对方。被 @ 的弹幕（带 [@了我]）必须优先回，并传 reply_to 指向它；不 @ 时不要传。
+</回复对象>"""
+
 LIVE_DANMAKU_HISTORY = """<直播历史一致性>
 最近弹幕里发送者是「{bot_name}」的是你自己;没有新内容就调用 cancel。
 </直播历史一致性>"""
@@ -420,20 +424,30 @@ class LiveDanmakuContext:
     recent_history: str = ""
     frame_context: str = ""
     scheduled_prompt: str = ""
+    memory: str = ""
+    room_memory: str = ""
+    viewer_memory: str = ""
 
 
-def build_live_danmaku_prompt(ctx: LiveDanmakuContext) -> tuple[str, str]:
-    """组装直播间弹幕的 system/user；块顺序与群聊提示词一致。"""
-    system = "\n".join(
+def build_live_danmaku_prompt(
+    ctx: LiveDanmakuContext, live_persona: str = ""
+) -> tuple[str, str]:
+    """组装直播间弹幕的 system/user；live_chat 配了独立人格就用它。"""
+    system = live_persona.strip() or "\n".join(
         [
             _identity(ctx.bot_name, 0, ctx.bot_data, ""),
             LIVE_DANMAKU_ADJUST,
             LIVE_DANMAKU_HISTORY.format(bot_name=ctx.bot_name or "你"),
+            LIVE_REPLY_TO_RULE,
         ]
     )
     parts = [f"<当前时间>{_time_text(None)}</当前时间>"]
     parts.append(f"<直播间>{ctx.room_name or 'B站直播间'}</直播间>")
     parts.append(f"<观众>{ctx.viewer_name or '观众'}</观众>")
+    if ctx.room_memory or ctx.memory:
+        parts.append(f"<直播间档案>\n{ctx.room_memory or ctx.memory}\n</直播间档案>")
+    if ctx.viewer_memory:
+        parts.append(f"<观众档案>\n{ctx.viewer_memory}\n</观众档案>")
     if ctx.recent_history:
         parts.append(f"<最近弹幕>\n{ctx.recent_history}\n</最近弹幕>")
     if ctx.frame_context:
@@ -442,9 +456,11 @@ def build_live_danmaku_prompt(ctx: LiveDanmakuContext) -> tuple[str, str]:
     return system, "\n".join(parts)
 
 
-def build_live_scheduled_prompt(ctx: LiveDanmakuContext) -> tuple[str, str]:
+def build_live_scheduled_prompt(
+    ctx: LiveDanmakuContext, live_persona: str = ""
+) -> tuple[str, str]:
     """组装直播间主动定时弹幕的 system/user。"""
-    system = "\n".join(
+    system = live_persona.strip() or "\n".join(
         [
             _identity(ctx.bot_name, 0, ctx.bot_data, ""),
             LIVE_DANMAKU_ADJUST,
@@ -454,9 +470,38 @@ def build_live_scheduled_prompt(ctx: LiveDanmakuContext) -> tuple[str, str]:
     )
     parts = [f"<当前时间>{_time_text(None)}</当前时间>"]
     parts.append(f"<直播间>{ctx.room_name or 'B站直播间'}</直播间>")
+    if ctx.room_memory or ctx.memory:
+        parts.append(f"<直播间档案>\n{ctx.room_memory or ctx.memory}\n</直播间档案>")
+    if ctx.viewer_memory:
+        parts.append(f"<观众档案>\n{ctx.viewer_memory}\n</观众档案>")
     if ctx.recent_history:
         parts.append(f"<最近弹幕>\n{ctx.recent_history}\n</最近弹幕>")
     if ctx.frame_context:
         parts.append(f"<当前直播画面>{ctx.frame_context}</当前直播画面>")
     parts.append(f"<要说的事>{ctx.scheduled_prompt}</要说的事>")
+    return system, "\n".join(parts)
+
+
+def build_live_observation_prompt(
+    ctx: LiveDanmakuContext, live_persona: str = ""
+) -> tuple[str, str]:
+    """组装主动观察直播画面的 system/user；允许 cancel。"""
+    system = live_persona.strip() or "\n".join(
+        [
+            _identity(ctx.bot_name, 0, ctx.bot_data, ""),
+            LIVE_DANMAKU_ADJUST,
+            "<主动观察>你每隔一段时间看一眼直播间画面。有话就说一句，没话就调用 cancel，不要硬凑。</主动观察>",
+        ]
+    )
+    parts = [f"<当前时间>{_time_text(None)}</当前时间>"]
+    parts.append(f"<直播间>{ctx.room_name or 'B站直播间'}</直播间>")
+    if ctx.room_memory or ctx.memory:
+        parts.append(f"<直播间档案>\n{ctx.room_memory or ctx.memory}\n</直播间档案>")
+    if ctx.viewer_memory:
+        parts.append(f"<观众档案>\n{ctx.viewer_memory}\n</观众档案>")
+    if ctx.recent_history:
+        parts.append(f"<最近弹幕>\n{ctx.recent_history}\n</最近弹幕>")
+    if ctx.frame_context:
+        parts.append(f"<当前直播画面>{ctx.frame_context}</当前直播画面>")
+    parts.append("<主动观察>看一眼画面，有话就发一条弹幕；没话就 cancel。</主动观察>")
     return system, "\n".join(parts)
