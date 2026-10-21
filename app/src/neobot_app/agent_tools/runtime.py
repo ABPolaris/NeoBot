@@ -105,13 +105,13 @@ class AgentToolRuntime:
             modules.append(self.children)
         if self.config.lsp_enabled:
             modules.append(self.lsp)
+        self._definitions: dict[str, dict] = {}
         if notification_hub is not None:
             self._report_tools = ChatReportTools(notification_hub)
             for definition in self._report_tools.definitions():
                 name = definition["function"]["name"]
                 self._definitions[name] = definition
                 self._modules[name] = self._report_tools
-        self._definitions: dict[str, dict] = {}
         for module in modules:
             for definition in module.definitions():
                 name = definition["function"]["name"]
