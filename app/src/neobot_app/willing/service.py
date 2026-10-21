@@ -83,6 +83,7 @@ class WillingService:
         observed_messages: tuple[str, ...] = (),
         extra_bot_names: tuple[str, ...] = (),
         base_probability: float | None = None,
+        mentioned: bool | None = None,
     ) -> WillingDecision:
         """直播弹幕的意愿判断（和群聊同一套 manager/系数/被@必回规则）。
 
@@ -99,7 +100,8 @@ class WillingService:
             raw_message=text,
         )
         names = (self._config.bot.nick_name, *(self._config.bot.alias_name or []), *extra_bot_names)
-        mentioned = any(name and str(name).casefold() in text.casefold() for name in names)
+        if mentioned is None:
+            mentioned = any(name and str(name).casefold() in text.casefold() for name in names)
         reply_mode = str(getattr(self._config.chat, "reply_mode", "agent") or "agent")
         config_global_coeff = (
             self._config.chat.willing_agent_global_coefficient
@@ -170,6 +172,10 @@ class WillingService:
         self._runtime_config.global_coefficient = clamp_probability(value)
         self._logger.info("runtime global coefficient updated", value=value)
         return f"全局回复系数已设为 {self._runtime_config.global_coefficient:.3f}"
+
+    def get_runtime_conversation_coefficient(self, conv_id: str) -> float | None:
+        conv_id = self._normalize_conversation_id(conv_id)
+        return self._runtime_config.conversation_coefficients.get(conv_id)
 
     def set_runtime_conversation_coefficient(self, conv_id: str, value: float) -> str:
         conv_id = self._normalize_conversation_id(conv_id)
