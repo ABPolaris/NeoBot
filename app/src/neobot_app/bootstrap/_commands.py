@@ -130,10 +130,10 @@ def _make_chat_config_update_callback(config: Any):
                 {key: value},
                 backup_dir=CONFIG_BACKUP_DIR,
             )
-        except Exception as exc:
-            return f"错误: 配置保存失败: {exc}"
+        except Exception:
+            return "错误: 配置保存失败，请查看日志"
         if not result.ok:
-            return f"错误: 配置保存失败: {result.error}"
+            return "错误: 配置保存失败，请查看日志"
         await asyncio.to_thread(_reload_live_config, config)
         return "ok"
 
