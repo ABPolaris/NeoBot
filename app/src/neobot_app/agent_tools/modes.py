@@ -9,6 +9,7 @@ NATIVE_TOOLS = frozenset({
     "run_python", "pwsh", "bash", "web_search", "web_fetch",
     "job_list", "job_output", "job_kill", "todo_write",
     "ask_user_question", "question_status", "enter_plan_mode", "exit_plan_mode", "skill",
+    "bilibili_watch_video", "report_to_chat",
 })
 
 # These names add no capability beside the canonical task tools. Directory
