@@ -126,7 +126,7 @@ async def compact_messages(
         {"role": "system", "content": "You compact conversation history for NeoBot."},
         {
             "role": "user",
-            "content": f"{COMPACT_INSTRUCTIONS}\n\n---\nConversation to compact:\n{transcript}",
+            "content": f"Conversation to compact:\n{transcript}\n\n---\n{COMPACT_INSTRUCTIONS}",
         },
     ]
     try:

@@ -127,3 +127,20 @@ async def test_cache_ttl_revalidates_external_changes(monkeypatch) -> None:
     assert payload["count"] == 1
     # 关键：之前那条 blob 里的消息（外部删除的对象）没有被整块写回
     assert len(payload["messages"]) == 1
+
+
+
+async def test_archive_write_retries_locked_transaction() -> None:
+    from neobot_memory.archive_service import _retry_locked_write
+
+    attempts = 0
+
+    async def write():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RuntimeError("database is locked")
+        return "ok"
+
+    assert await _retry_locked_write(write, attempts=3) == "ok"
+    assert attempts == 3

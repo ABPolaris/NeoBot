@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -29,6 +30,24 @@ _OVER_LIMIT_PREVIEW_CHARS = 200
 MAX_ARCHIVE_SNAPSHOTS_PER_KEY = 10
 #: 压缩前快照的全局兜底上限（防止大量不同 key 无限累积）。
 MAX_ARCHIVE_SNAPSHOTS = 2000
+
+async def _retry_locked_write(factory: Any, *, attempts: int = 4) -> Any:
+    """SQLite 瞬时锁冲突时重放整个事务；只对锁错误重试。"""
+    last: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            return await factory()
+        except Exception as exc:
+            last = exc
+            message = str(exc).casefold()
+            if "database is locked" not in message and "锁冲突" not in message:
+                raise
+            if attempt + 1 >= attempts:
+                break
+            await asyncio.sleep(0.1 * (2 ** attempt))
+    assert last is not None
+    raise last
+
 
 #: 不参与容量治理的内部表（默认豁免名单）。
 #: ⚠️ 与 agent.memory.archive.allowed_tables 语义完全不同：那个是「限制模型能访问
@@ -310,9 +329,13 @@ class ArchiveMemoryService:
                 error=f"档案超过存储上限 {limit} 字（当前 {chars} 字），已拒绝写入",
             )
 
-        async with self._uow_factory() as uow:
-            item = await uow.archive.set(table_name, key, value, tags)
-            await uow.commit()
+        async def _write_once() -> Any:
+            async with self._uow_factory() as uow:
+                written = await uow.archive.set(table_name, key, value, tags)
+                await uow.commit()
+                return written
+
+        item = await _retry_locked_write(_write_once)
         self._logger.debug(
             "存档记忆已保存",
             table_name=table_name,

@@ -357,7 +357,7 @@ class BackgroundDrawingManager:
         if attempt:
             payload["attempt"] = attempt
         if task.error:
-            payload["error"] = task.error
+            payload["error"] = "绘图失败"
         if task.model:
             payload["model"] = task.model
         if task.requester or task.requirements:
@@ -376,7 +376,7 @@ class BackgroundDrawingManager:
             return [
                 {
                     "action": "reply_to_user",
-                    "text": "绘图失败，说明失败原因并询问是否重试",
+                    "text": "绘图失败，告知用户稍后重试，不要复述技术错误",
                 },
                 {
                     "action": "note",

@@ -262,7 +262,8 @@ class BilibiliRuntime:
         try:
             st = self.service.status()
         except Exception as exc:
-            return f"B站状态读取失败：{exc}"
+            self._logger.warning("B站状态读取失败", error=str(exc))
+            return "B站状态读取失败，请稍后重试"
         if not st.get("available"):
             return "B站未登录（功能等同关闭）。发送 /login bilibili 扫码登录。"
         state = "有效" if st.get("valid") else "登录态待校验"
@@ -437,10 +438,10 @@ class BilibiliRuntime:
                 ok = False
                 try:
                     ok = await self.login_with_qr(on_qr=_on_qr)
-                except Exception as exc:
+                except Exception:
                     self._logger.exception("B站扫码登录失败")
                     await command_service.reply_to(
-                        ctx.kind, ctx.conv_id, f"B站登录失败：{exc}", at_user_id=None
+                        ctx.kind, ctx.conv_id, "B站登录失败，请稍后重试", at_user_id=None
                     )
                     return
                 if ok:
@@ -484,7 +485,8 @@ class BilibiliRuntime:
             try:
                 dyn_id = await self.publish_dynamic(text)
             except Exception as exc:
-                return f"发布B站动态失败：{exc}"
+                self._logger.warning("B站动态发布失败", error=str(exc))
+                return "发布B站动态失败，请稍后重试"
             return f"已发布B站动态，dynamic_id={dyn_id}"
         return "用法：/bili [status|dynamic <文本>]"
 

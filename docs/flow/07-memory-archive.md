@@ -14,7 +14,7 @@ covers:
   - packages/storage/src/neobot_storage/repositories/archive.py
   - packages/storage/src/neobot_storage/repositories/archive_snapshot.py
 verified_against: d37eae4
-verified_hash: 071da024ade1
+verified_hash: 75976aa0d95f
 ---
 
 # 07 档案记忆：自动总结触发 · 三种写入结果 · 溢出压缩与快照

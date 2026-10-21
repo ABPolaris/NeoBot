@@ -765,7 +765,7 @@ async def _modify_admin(ctx: CommandContext, *, add: bool) -> str:
 
     result = await ctx.service.save_sub_admins(sorted(current))
     if not result.ok:
-        return f"错误: 配置保存失败: {result.error or '未知原因'}"
+        return "错误: 配置保存失败，请查看日志"
 
     # 以"磁盘上回读到的列表"为准回复：写盘静默失败时不能再报成功
     persisted = list(result.accounts)

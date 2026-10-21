@@ -97,8 +97,8 @@ async def run_script(monkeypatch, responses, *, full_check=True, kind="group", e
 
 
 @pytest.mark.parametrize("full_check", [True, False])
-async def test_plain_prose_without_tool_is_failed_and_never_sent(monkeypatch, full_check):
-    """没有 tool_calls 的正文一律不发送：不追问、不重试，只留审计。"""
+async def test_plain_prose_without_tool_is_cancelled_and_never_sent(monkeypatch, full_check):
+    """没有 tool_calls 的正文不发送；已发过 reminder，最终取消而不是记错误。"""
     draft = "你好" if full_check else "很长的待审草稿" * 100
     extras: list = []
     event, provider, sent, stages, runtime_stages, queue = await run_script(
@@ -109,23 +109,22 @@ async def test_plain_prose_without_tool_is_failed_and_never_sent(monkeypatch, fu
     )
     assert len(provider.calls) == 2
     assert "no_tool_call_reminder" in stages
-    assert event.state is ReplyState.FAILED
+    assert event.state is ReplyState.CANCELLED
     assert event.completed_at is not None
-    assert "没有调用工具" in event.error
+    assert event.error is None
     assert event.generated_text == ""
     assert event.send_response is None
     sent.assert_not_awaited()
     assert "unsent_prose_detected" in stages
     audit = dict(extras)["unsent_prose_detected"]
     assert audit["reply_text"] == draft
-    assert "failed" in stages and "completed" not in stages
-    assert "reply.fail" in runtime_stages and "reply.complete" not in runtime_stages
+    assert "reply.cancel" in runtime_stages and "reply.complete" not in runtime_stages
     assert not queue.entries("888888")
 
 
 @pytest.mark.parametrize("full_check", [True, False])
 @pytest.mark.parametrize("review", ["或者就这句？简短自然", "cancel", ""])
-async def test_review_without_tool_is_failed_and_never_sends_draft(monkeypatch, full_check, review):
+async def test_review_without_tool_is_cancelled_and_never_sends_draft(monkeypatch, full_check, review):
     draft = "你好" if full_check else "很长的待审草稿" * 100
     first = tool_response("send_reply", {"text": draft})
     event, provider, sent, stages, runtime_stages, queue = await run_script(
@@ -135,15 +134,14 @@ async def test_review_without_tool_is_failed_and_never_sends_draft(monkeypatch, 
     )
     assert len(provider.calls) == 3
     assert "no_tool_call_reminder" in stages
-    assert event.state is ReplyState.FAILED
+    assert event.state is ReplyState.CANCELLED
     assert event.completed_at is not None
-    assert "AI回复检查未通过" in event.error
+    assert event.error is None
     assert event.generated_text == ""
     assert event.send_response is None
     sent.assert_not_awaited()
     assert "ai_reply_check_without_tool_call" in stages
-    assert "failed" in stages and "completed" not in stages
-    assert "reply.fail" in runtime_stages and "reply.complete" not in runtime_stages
+    assert "reply.cancel" in runtime_stages and "reply.complete" not in runtime_stages
     assert not queue.entries("888888")
 
 
@@ -176,11 +174,11 @@ async def test_bare_cancel_in_plain_model_output_is_not_claimed_sent(monkeypatch
     assert len(provider.calls) == 2
     assert "no_tool_call_reminder" in stages
     sent.assert_not_awaited()
-    assert event.state is ReplyState.FAILED
+    assert event.state is ReplyState.CANCELLED
     assert event.send_response is None
-    assert "未发送" in event.error
+    assert event.error is None
     assert "unsent_prose_detected" in stages
-    assert "reply.fail" in runtime_stages and "reply.complete" not in runtime_stages
+    assert "reply.cancel" in runtime_stages and "reply.complete" not in runtime_stages
 
 
 @pytest.mark.parametrize("text,segments", [

@@ -112,7 +112,7 @@ async def test_failed_notification_is_json_false_with_error():
 
     assert payload["ok"] is False
     assert payload["status"] == "failed"
-    assert "无法解析参考图" in payload["error"]
+    assert payload["error"] == "绘图失败"
     assert payload["next"][0]["action"] == "reply_to_user"
 
 
