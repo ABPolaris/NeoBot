@@ -62,25 +62,14 @@ class DebugHelper:
             return
         if "chat provider" not in str(exc):
             return
-        conv_ref = getattr(event, "conversation_ref", None)
-        if conv_ref is None:
-            return
-        try:
-            await send_with_timeout(conv_ref, provider_error_message)
-        except Exception as send_exc:
-            self._logger.error(
-                "模型不可用提示发送失败",
-                event_id=getattr(event, "event_id", "?"),
-                error=str(send_exc),
-            )
-            self.record(
-                "provider_unavailable_notice_failed",
-                event,
-                send_error=str(send_exc),
-            )
-            return
+        # 模型不可用只写日志；不向任何聊天流发送错误提示。
+        self._logger.error(
+            "模型不可用（错误只写日志，不发送到聊天）",
+            event_id=getattr(event, "event_id", "?"),
+            error=str(exc),
+        )
         self.record(
-            "provider_unavailable_notice_sent",
+            "provider_unavailable_notice_suppressed",
             event,
-            notice=provider_error_message,
+            error=str(exc),
         )
