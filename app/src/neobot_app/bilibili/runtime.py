@@ -40,6 +40,10 @@ async def _maybe_await(value: Any) -> None:
         await value
 
 
+#: summary 完成后等待 30 分钟再生成日记；summary 未结束则 diary 一直等。
+DIARY_SUMMARY_SETTLE_SECONDS = 1800.0
+
+
 class BilibiliRuntime:
     """B站功能的一站式运行时。"""
 
@@ -56,6 +60,7 @@ class BilibiliRuntime:
         on_live_event: Any = None,
         willing_service: Any = None,
         flow_registry: Any = None,
+        archive_summary_service: Any = None,
         notification_hub: Any = None,
         logger: Logger | None = None,
         bot_name: str = "",
@@ -63,6 +68,7 @@ class BilibiliRuntime:
     ) -> None:
         self._config = config
         self._logger = logger or NullLogger()
+        self._archive_summary_service = archive_summary_service
         self._command_service = command_service
         self._started = False
         cfg = getattr(config, "bilibili", None)
@@ -105,6 +111,7 @@ class BilibiliRuntime:
             self.service,
             cfg,
             archive_service=archive_service,
+            data_dir=DATA_DIR,
             bot_name=bot_name,
             bot_data=bot_data,
         )
@@ -194,6 +201,10 @@ class BilibiliRuntime:
 
     # ── 每日动态日记 ──
 
+    def set_archive_summary_service(self, service: Any) -> None:
+        """日记前 5 分钟用它把群聊摘要刷新到最新。"""
+        self._archive_summary_service = service
+
     def _seconds_until_diary(self, now: datetime | None = None) -> float | None:
         """距下一次 dynamic_diary_time（HH:MM）的秒数；未启用/配置非法返回 None。"""
         cfg = getattr(self._config, "bilibili", None)
@@ -219,7 +230,19 @@ class BilibiliRuntime:
             delay = self._seconds_until_diary()
             if delay is None:
                 return
-            await asyncio.sleep(delay)
+            summary = self._archive_summary_service
+            if summary is not None:
+                # 原定时间前 5 分钟启动 summary；不设超时，结束后再等 30 分钟。
+                await asyncio.sleep(max(0.0, delay - 300.0))
+                try:
+                    await summary.flush_all()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self._logger.warning("B站日记前摘要刷新失败", error=str(exc))
+                await asyncio.sleep(DIARY_SUMMARY_SETTLE_SECONDS)
+            else:
+                await asyncio.sleep(delay)
             try:
                 result = await self.diary.run()
             except asyncio.CancelledError:
