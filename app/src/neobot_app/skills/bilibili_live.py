@@ -56,6 +56,37 @@ class BilibiliLiveSkill(SkillModule):
                 },
             ),
             self._tool_def(
+                "get_live_willingness",
+                "查看直播间回复意愿系数；不传 room_id 时列出全部房间。1.0 表示所有弹幕都回。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号，可选"},
+                    },
+                    "required": [],
+                },
+            ),
+            self._tool_def(
+                "set_live_willingness",
+                "设置直播间回复意愿系数（0.0~1.0）；默认 1.0=所有非空弹幕都回。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号"},
+                        "value": {"type": "number", "description": "0.0~1.0；0 全不回，1 全回"},
+                    },
+                    "required": ["room_id", "value"],
+                },
+            ),
+            self._tool_def(
+                "remove_live_willingness",
+                "移除直播间回复意愿系数，恢复默认所有非空弹幕都回。",
+                {
+                    "properties": {
+                        "room_id": {"type": "integer", "description": "直播间短号或房间号"},
+                    },
+                    "required": ["room_id"],
+                },
+            ),
+            self._tool_def(
                 "send_danmaku",
                 "以当前登录的B站账号在直播间发一条弹幕；仅开播时发送，下播返回未开播不互动。",
                 {
@@ -192,6 +223,22 @@ class BilibiliLiveSkill(SkillModule):
         try:
             if tool_name == "status":
                 return await self._status(live, args)
+            if tool_name == "get_live_willingness":
+                return _json(live.get_live_willingness(_room_id(args)))
+            if tool_name == "set_live_willingness":
+                rid = _room_id(args)
+                if rid <= 0:
+                    return _json({"ok": False, "error": "房间号无效"})
+                try:
+                    value = float(args.get("value"))
+                except (TypeError, ValueError):
+                    return _json({"ok": False, "error": "value 必须是数字"})
+                return _json(live.set_live_willingness(rid, value))
+            if tool_name == "remove_live_willingness":
+                rid = _room_id(args)
+                if rid <= 0:
+                    return _json({"ok": False, "error": "房间号无效"})
+                return _json(live.remove_live_willingness(rid))
             if tool_name == "send_danmaku":
                 return await self._send_danmaku(live, args)
             if tool_name == "read_history":
