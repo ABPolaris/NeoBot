@@ -20,6 +20,9 @@ from neobot_app.image.unavailable import (
 from neobot_app.message.numbering import MessageNumbering
 from neobot_app.skills.base import SkillModule
 from neobot_app.utils.http import image_http_client
+from neobot_app.utils.logger import get_module_logger
+
+logger = get_module_logger("skills.image_parse")
 
 def _json(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False, sort_keys=True)
@@ -838,7 +841,9 @@ class ImageParseSkill(SkillModule):
 
 async def _handle_parse_image(self: ImageParseSkill, args: dict) -> str:
     if self._vision_provider is None:
-        return _json({"ok": False, "error": "vision_provider 未配置"})
+        # 视觉模型不可用只写日志；不要把错误文案交给 agent/聊天流。
+        logger.warning("图片解析视觉模型未配置，跳过解析（仅记录日志）")
+        return _json({"ok": True, "skipped": True, "note": ""})
     requirement = str(args.get("requirement") or "请简洁描述这张图片的主要内容。").strip()
     image_path = args.get("image_path")
     image_url = args.get("image_url")
