@@ -109,8 +109,8 @@ async def test_multiple_keys_isolated_waiting_one_does_not_affect_other() -> Non
     assert service._pending == {}
 
 
-async def test_parse_single_image_failure_replaces_segment_with_error_text() -> None:
-    """Arrange: _parse_single_image 抛异常的桩；Act: parse_message_images 并等待；Assert: 图片段被替换为失败文案且任务被清理。"""
+async def test_parse_single_image_failure_replaces_segment_with_empty_text() -> None:
+    """解析失败只记日志，不再把错误文案塞进聊天消息。"""
     message = _group_message(6, ("image", {"file": "boom.jpg"}))
     service = ImageParseService()
     service._parse_single_image = AsyncMock(side_effect=RuntimeError("boom"))
@@ -119,7 +119,7 @@ async def test_parse_single_image_failure_replaces_segment_with_error_text() -> 
     await service.wait_for_queue("k")
 
     assert message.message[0].type == "text"
-    assert message.message[0].data["text"] == "[图片解析失败]"
+    assert message.message[0].data["text"] == ""
     assert service._pending == {}
 
 
