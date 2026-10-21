@@ -4,7 +4,7 @@
 再连 B站弹幕 WebSocket（`wss://host:wss_port/sub`）收 DANMU_MSG，按需调用
 provider 生成一句极短回复，再由 BilibiliClient.send_danmaku 发出。
 
-只参与开播阶段：房间 live_status 缓存 60 秒，自动回复走群聊式 WillingService 意愿判断，定时弹幕/手动弹幕都先查；
+只参与开播阶段：房间 live_status 缓存 60 秒，所有非空弹幕都会触发自动回复（仅受 cooldown 节流）；
 下播时 WSS 可以继续收弹幕（保留历史），但不生成、不发送。
 
 启用房间与定时弹幕持久化在 `<DATA_DIR>/bilibili/live_interact.json`；
