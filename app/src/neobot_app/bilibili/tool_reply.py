@@ -19,7 +19,13 @@ _SEND_REPLY = {
         "description": "发送这条B站回复。必须调用它；直接输出的正文不会被发送。",
         "parameters": {
             "type": "object",
-            "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 20000}},
+            "properties": {
+                "text": {"type": "string", "minLength": 1, "maxLength": 20000},
+                "reply_to": {
+                    "type": "integer",
+                    "description": "可选：要 @ 的观众 UID（直播间弹幕行首 [uid=...]）；不传则不 @",
+                },
+            },
             "required": ["text"],
             "additionalProperties": False,
         },
@@ -40,13 +46,18 @@ class ToolReply:
     text: str | None = None
     usage: dict[str, Any] | None = None
     segments: list[str] | None = None
+    reply_to: int = 0
 
 
 class _ReplyExecutor:
-    def __init__(self, *, max_chars: int = 0, split: bool = False) -> None:
+    def __init__(
+        self, *, max_chars: int = 0, split: bool = False, allow_reply_to: bool = False
+    ) -> None:
         self.max_chars = max(0, int(max_chars or 0))
         self.split = bool(split)
+        self.allow_reply_to = bool(allow_reply_to)
         self.text: str | None = None
+        self.reply_to = 0
         self.segments: list[str] | None = None
         self.cancelled = False
 
@@ -62,6 +73,11 @@ class _ReplyExecutor:
             text = str(args.get("text") or "").strip()
             if not text:
                 return '{"ok": false, "error": "text 不能为空"}'
+            if self.allow_reply_to:
+                try:
+                    self.reply_to = int(args.get("reply_to") or 0)
+                except (TypeError, ValueError):
+                    self.reply_to = 0
             if text.upper() == "[SKIP]":
                 self.cancelled = True
                 self.text = None
@@ -106,11 +122,14 @@ async def run_tool_reply(
     max_chars: int = 0,
     split: bool = False,
     timeout: float = 90.0,
+    allow_reply_to: bool = False,
 ) -> ToolReply:
     """跑一轮只含 send_reply/cancel 的 agent 循环，返回工具指定的回复。"""
     if provider is None:
         return ToolReply()
-    executor = _ReplyExecutor(max_chars=max_chars, split=split)
+    executor = _ReplyExecutor(
+        max_chars=max_chars, split=split, allow_reply_to=allow_reply_to
+    )
     toolset = Toolset(
         executor=executor,
         specs=[
@@ -141,4 +160,5 @@ async def run_tool_reply(
         text=None if executor.cancelled else executor.text,
         usage=usage,
         segments=None if executor.cancelled else executor.segments,
+        reply_to=0 if executor.cancelled else executor.reply_to,
     )
