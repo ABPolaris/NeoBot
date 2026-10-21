@@ -1168,47 +1168,68 @@ class ReplyOrchestrator:
         """私聊超限时把较早历史压成 DSH 风格检查点；失败返回 False。"""
         from neobot_app.runtime.compact import compact_messages
 
-        try:
-            result = await compact_messages(
-                self._provider,
-                messages,
-                retain=8,
-                timeout=max(10.0, self._get_model_response_timeout_seconds(event)),
-            )
-        except Exception as exc:
-            self._logger.warning(
-                "私聊上下文压缩失败",
-                event_id=event.event_id,
-                queue_key=queue_key,
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            return False
-        if not result:
-            self._logger.warning(
-                "私聊上下文压缩未产生有效检查点",
-                event_id=event.event_id,
-                queue_key=queue_key,
-            )
-            return False
         original = len(messages)
-        messages[:] = result["messages"]
-        self._logger.info(
-            "私聊上下文已压缩",
+        max_tokens = self._get_private_chat_max_tokens()
+        # 一次 compact 后仍可能超限（检查点本身较大）；最多再压两轮。
+        for attempt in range(3):
+            retain = 8 if attempt == 0 else max(2, 8 // (attempt + 1))
+            try:
+                result = await compact_messages(
+                    self._provider,
+                    messages,
+                    retain=retain,
+                    timeout=max(10.0, self._get_model_response_timeout_seconds(event)),
+                )
+            except Exception as exc:
+                self._logger.warning(
+                    "私聊上下文压缩失败",
+                    event_id=event.event_id,
+                    queue_key=queue_key,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                return False
+            if not result:
+                self._logger.warning(
+                    "私聊上下文压缩未产生有效检查点",
+                    event_id=event.event_id,
+                    queue_key=queue_key,
+                    attempt=attempt + 1,
+                )
+                return False
+            messages[:] = result["messages"]
+            estimated = self._estimate_tokens(messages)
+            self._logger.info(
+                "私聊上下文已压缩",
+                event_id=event.event_id,
+                queue_key=queue_key,
+                attempt=attempt + 1,
+                removed_messages=result.get("removed", 0),
+                messages_before=original,
+                messages_after=len(messages),
+                estimated_tokens=estimated,
+                max_tokens=max_tokens,
+            )
+            self._record_debug(
+                "private_context_compacted",
+                event,
+                queue_key=queue_key,
+                attempt=attempt + 1,
+                removed=result.get("removed", 0),
+                before=original,
+                after=len(messages),
+                estimated_tokens=estimated,
+                max_tokens=max_tokens,
+            )
+            if estimated < max_tokens:
+                return True
+        self._logger.warning(
+            "私聊上下文压缩后仍超限",
             event_id=event.event_id,
             queue_key=queue_key,
-            removed_messages=result.get("removed", 0),
-            messages_before=original,
-            messages_after=len(messages),
+            estimated_tokens=estimated,
+            max_tokens=max_tokens,
         )
-        self._record_debug(
-            "private_context_compacted",
-            event,
-            queue_key=queue_key,
-            removed=result.get("removed", 0),
-            before=original,
-            after=len(messages),
-        )
-        return True
+        return False
 
     def _get_private_chat_new_message_collect_seconds(self) -> float:
         if self._config is not None:
@@ -3753,27 +3774,23 @@ class ReplyOrchestrator:
     ) -> None:
         """没有工具调用的正文不发送：agent 模式下发言只能走 send_reply/cancel。
 
-        正文通常是模型写出来的「要不要接话」判断或草稿，直接发送就是用户可见的
-        泄漏。这里不重试、不追问（追问只会让模型把草稿再说一遍并多烧一轮 token），
-        只把原文放进 debug 事件供审计，并把事件置为 FAILED。
+        第一轮已经通过 reminder 把纠正提示发给模型；这里只做最终取消与审计，
+        不再把「没调工具」记成错误（错误信息对模型下一次修复没有意义）。
         """
         if review_pending:
-            event.error = "AI回复检查未通过：缺少明确的发送或取消决定，检查正文未发送"
             stage = "ai_reply_check_without_tool_call"
         else:
-            event.error = (
-                "模型输出了正文但没有调用工具，内容未发送"
-                "（agent 模式必须调用 send_reply 或 cancel）"
-            )
             stage = "unsent_prose_detected"
+        # 不把“没调工具”写成事件错误：它已经通过 reminder 发回给模型，
+        # 再记 FAILED 只会污染观测，对下一次语言修复没有任何信息价值。
         if not event.is_terminal:
             try:
-                event.transition(ReplyState.FAILED)
+                event.transition(ReplyState.CANCELLED)
             except RuntimeError:
                 pass
 
-        self._logger.warning(
-            "模型输出正文但没有工具调用，回复未发送",
+        self._logger.info(
+            "模型多次输出正文但没有工具调用，已取消本轮（不发送草稿）",
             event_id=event.event_id,
             queue_key=queue_key,
             iteration=iteration,
