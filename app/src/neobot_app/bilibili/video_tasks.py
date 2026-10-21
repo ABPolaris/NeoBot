@@ -127,7 +127,7 @@ class BilibiliVideoTaskManager:
             "source": result.get("source", ""),
             "transcript": str(result.get("transcript", ""))[:6000],
             "comments": result.get("comments", [])[:5],
-            "error": task.error,
+            "error": "视频解析失败" if task.error else "",
             "note": "这是后台视频解析结果，不是新任务；需要全文可调用 read_video_transcript。",
         }
         content = title + "\n" + json.dumps(payload, ensure_ascii=False)[:8000]
