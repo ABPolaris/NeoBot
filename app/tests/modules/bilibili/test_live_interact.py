@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import struct
 import time
 import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +52,7 @@ class _FakeClient:
         self.user_agent = live_interact.DEFAULT_USER_AGENT
         self.room_calls: list[int] = []
         self.sent: list[tuple[int, str]] = []
+        self.sent_targets: list[tuple[int, str]] = []
 
     def get_live_room_info(self, room_id: int) -> dict:
         self.room_calls.append(room_id)
@@ -58,17 +61,21 @@ class _FakeClient:
     def get_live_danmu_info(self, room_id: int) -> dict:
         return self.danmu_info
 
-    def send_danmaku(self, room_id: int, text: str) -> bool:
+    def send_danmaku(
+        self, room_id: int, text: str, *, reply_mid: int = 0, reply_uname: str = ""
+    ) -> bool:
         if not self.send_ok:
             return False
         self.sent.append((room_id, text))
+        self.sent_targets.append((reply_mid, reply_uname))
         return True
 
 
 class _FakeProvider:
-    def __init__(self, content: str = "在呢", *, raises: bool = False) -> None:
+    def __init__(self, content: str = "在呢", *, raises: bool = False, reply_to: int = 0) -> None:
         self.content = content
         self.raises = raises
+        self.reply_to = reply_to
         self.messages: list[list[dict]] = []
 
     async def chat(self, messages: list[dict], tools=None) -> dict:
@@ -84,7 +91,11 @@ class _FakeProvider:
                     "type": "function",
                     "function": {
                         "name": "send_reply",
-                        "arguments": json.dumps({"text": self.content}, ensure_ascii=False),
+                        "arguments": json.dumps(
+                            {"text": self.content, "reply_to": self.reply_to}
+                            if self.reply_to else {"text": self.content},
+                            ensure_ascii=False,
+                        ),
                     },
                 }
             ],
@@ -124,6 +135,7 @@ async def test_enable_persists_state_and_restores_on_start(tmp_path: Path) -> No
         "real_room_id": 21452505,
         "name": "主播",
         "auto_reply": True,
+        "asr": False,
     }
     assert client.room_calls == [5440]
     state_path = tmp_path / "bilibili" / "live_interact.json"
@@ -134,6 +146,7 @@ async def test_enable_persists_state_and_restores_on_start(tmp_path: Path) -> No
                 "real_room_id": 21452505,
                 "name": "主播",
                 "auto_reply": True,
+                "asr": False,
             }
         }
     }
@@ -145,6 +158,7 @@ async def test_enable_persists_state_and_restores_on_start(tmp_path: Path) -> No
             "real_room_id": 21452505,
             "name": "主播",
             "auto_reply": True,
+            "asr": False,
         }
     ]
     await restarted.start()
@@ -215,7 +229,7 @@ async def test_at_filter_generates_and_sends(tmp_path: Path) -> None:
     assert "最近弹幕" in user["content"]
 
     await interactor._handle_danmu("5440", {"uid": 8, "name": "观众", "text": "随便说"})
-    assert client.sent == [(5440, "在呢")]
+    assert client.sent == [(5440, "在呢"), (5440, "在呢")]
 
 
 async def test_at_only_false_replies_to_any_danmu(tmp_path: Path) -> None:
@@ -257,12 +271,12 @@ async def test_cooldown_blocks_until_elapsed(tmp_path: Path) -> None:
     assert len(client.sent) == 2
 
 
-async def test_per_minute_cap(tmp_path: Path) -> None:
+async def test_all_danmaku_trigger_without_minute_cap(tmp_path: Path) -> None:
     provider = _FakeProvider()
     interactor, client, _ = await _enabled(tmp_path, provider=provider, cooldown=0.0)
     for index in range(4):
         await interactor._handle_danmu("5440", {"uid": 8, "name": "观众", "text": f"@小助手 {index}"})
-    assert len(client.sent) == 3
+    assert len(client.sent) == 4
 
 
 class _FakeWS:
@@ -327,6 +341,7 @@ async def test_websocket_auth_packet_and_danmu_flow(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(live_interact.aiohttp, "ClientSession", lambda *a, **k: session)
 
     await interactor._connect_once("5440")
+    await asyncio.gather(*interactor._reply_tasks)
 
     assert session.url == "wss://broadcastlv.chat.bilibili.com:443/sub"
     assert session.headers["Origin"] == "https://live.bilibili.com"
@@ -553,7 +568,7 @@ async def test_history_keeps_latest_500_danmu(tmp_path: Path) -> None:
     assert len(history) == 500
     assert history[0]["text"] == "弹幕5"
     assert history[-1]["text"] == "弹幕504"
-    assert set(history[0]) == {"uid", "name", "text", "time", "ts"}
+    assert set(history[0]) == {"uid", "name", "text", "time", "ts", "at_me"}
     assert len(history[0]["time"]) == 8
     assert interactor.get_history(5440, 2)[-1]["text"] == "弹幕504"
     assert interactor.get_history(9999) == []
@@ -670,7 +685,7 @@ class _FakeVision:
         return {"content": "主播正在挥手"}
 
 
-async def test_reply_chain_captures_frame_context(tmp_path: Path) -> None:
+async def test_reply_does_not_auto_capture_frame_by_default(tmp_path: Path) -> None:
     provider = _FakeProvider("欢迎")
     interactor, client, _ = await _enabled(tmp_path, provider=provider, at_only=False)
     media = _FakeMedia()
@@ -680,12 +695,12 @@ async def test_reply_chain_captures_frame_context(tmp_path: Path) -> None:
     interactor._describe_frame = lambda snapshot: _async_value("主播正在挥手")  # type: ignore[method-assign]
 
     await interactor._handle_danmu("5440", {"uid": 9, "name": "观众", "text": "在吗"})
-    assert media.captures == [5440]
+    assert media.captures == []
     assert client.sent == [(5440, "欢迎")]
     last_user = next(
         item for item in reversed(provider.messages[-1]) if item.get("role") == "user"
     )
-    assert "主播正在挥手" in last_user["content"]
+    assert "主播正在挥手" not in last_user["content"]
 
 
 async def _async_value(value):
@@ -716,8 +731,7 @@ async def test_live_auto_reply_uses_willingness_without_at(tmp_path: Path) -> No
 
     await interactor._handle_danmu("5440", {"uid": 9, "name": "观众", "text": "在吗"})
     assert client.sent == [(5440, "欢迎")]
-    assert willing.calls and willing.calls[0]["room_id"] == 5440
-    assert willing.calls[0]["text"] == "在吗"
+    assert willing.calls == []
 
 
 async def test_live_auto_reply_skips_when_willingness_denies(tmp_path: Path) -> None:
@@ -728,7 +742,7 @@ async def test_live_auto_reply_skips_when_willingness_denies(tmp_path: Path) -> 
     interactor._willing_service = _FakeWilling(False)
 
     await interactor._handle_danmu("5440", {"uid": 9, "name": "观众", "text": "在吗"})
-    assert client.sent == []
+    assert client.sent == [(5440, "欢迎")]
 
 
 
@@ -783,3 +797,99 @@ async def test_overlong_live_reply_is_rejected_for_rewrite(tmp_path: Path) -> No
     await interactor._handle_danmu("5440", {"uid": 9, "name": "观众", "text": "随便说"})
     assert client.sent == []
     assert len(provider.messages) >= 2
+
+
+
+async def test_asr_switch_controls_live_prompt_context(tmp_path: Path) -> None:
+    provider = _FakeProvider("好哦")
+    interactor, _client, _ = await _enabled(tmp_path, provider=provider, at_only=False)
+    interactor._asr_service = object()
+    interactor.transcribe = AsyncMock(  # type: ignore[method-assign]
+        return_value={"ok": True, "text": "主播刚说晚上好"}
+    )
+
+    async def _user_content() -> str:
+        messages = provider.messages[0]
+        return next(
+            str(item.get("content") or "")
+            for item in messages
+            if item.get("role") == "user"
+        )
+
+    await interactor.set_asr(5440, True)
+    await interactor._generate_reply("在吗", 5440)
+    on_content = await _user_content()
+    assert "<直播语音>主播刚说晚上好</直播语音>" in on_content
+    calls_after_on = interactor.transcribe.await_count  # type: ignore[attr-defined]
+
+    await interactor.set_asr(5440, False)
+    provider.messages.clear()
+    await interactor._generate_reply("在吗", 5440)
+    off_content = await _user_content()
+    assert "<直播语音>" not in off_content
+    assert interactor.transcribe.await_count == calls_after_on  # type: ignore[attr-defined]
+
+
+
+async def test_live_reply_passes_reply_to(tmp_path: Path) -> None:
+    provider = _FakeProvider("回你", reply_to=8)
+    interactor, client, _ = await _enabled(tmp_path, provider=provider)
+    await interactor._handle_danmu("5440", {"uid": 8, "name": "观众", "text": "@小助手 在吗"})
+    assert client.sent == [(5440, "回你")]
+    assert client.sent_targets == [(8, "观众")]
+
+
+async def test_live_persona_uses_live_chat_section(tmp_path: Path) -> None:
+    from neobot_app.bilibili.prompts import LiveDanmakuContext, build_live_danmaku_prompt
+
+    class _Store:
+        def get(self, section, sub="template", default=""):
+            return "自定义直播人格" if section == "live_chat" else ""
+
+    interactor = BilibiliLiveInteractor(None, data_dir=tmp_path, prompt_store=_Store())
+    assert interactor._live_persona() == "自定义直播人格"
+    system, _user = build_live_danmaku_prompt(LiveDanmakuContext(), interactor._live_persona())
+    assert system == "自定义直播人格"
+
+
+async def test_history_keeps_500_for_prompt(tmp_path: Path) -> None:
+    interactor = BilibiliLiveInteractor(None, data_dir=tmp_path)
+    for index in range(520):
+        interactor._record_history("5440", {"uid": 8, "name": "观众", "text": f"m{index}"})
+    lines = interactor.format_history(5440).splitlines()
+    assert len(lines) == 500
+    assert "m0" not in lines[0]
+    assert "m519" in lines[-1]
+
+
+
+async def test_screenshot_replies_captures_frame_when_enabled(tmp_path: Path) -> None:
+    provider = _FakeProvider("欢迎")
+    interactor, client, _ = await _enabled(tmp_path, provider=provider, at_only=False)
+    media = _FakeMedia()
+    interactor._media = media
+    interactor._screenshot_replies = True
+
+    await interactor._handle_danmu("5440", {"uid": 9, "name": "观众", "text": "在吗"})
+    assert media.captures == [5440]
+    assert client.sent == [(5440, "欢迎")]
+
+
+
+async def test_live_summarizes_every_200(tmp_path: Path) -> None:
+    provider = _FakeProvider("这直播间在聊游戏")
+    archive = SimpleNamespace(set=AsyncMock())
+    interactor = BilibiliLiveInteractor(
+        _FakeClient(),
+        provider=provider,
+        bot_name="小助手",
+        data_dir=tmp_path,
+        archive_service=archive,
+        summary_every=200,
+    )
+    interactor._chat = AsyncMock(return_value="这直播间在聊游戏")  # type: ignore[method-assign]
+    for index in range(200):
+        interactor._record_history("5440", {"uid": 8, "name": "观众", "text": f"弹幕{index}"})
+    await asyncio.gather(*interactor._summary_tasks)
+    assert interactor._room_memory["5440"] == "这直播间在聊游戏"
+    archive.set.assert_awaited_once()
