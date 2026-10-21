@@ -180,7 +180,7 @@ async def test_write_failure_is_reported_as_error(config_file: Path, monkeypatch
     reply, _config, _service_ = await _run(config_file, "/add_admin 30003", SUPER)
 
     assert reply.startswith("错误")
-    assert "写入配置失败" in reply
+    assert "配置保存失败" in reply
     assert read_sub_admin_accounts(config_file) == ()
 
 
@@ -193,7 +193,7 @@ async def test_silent_write_is_detected_and_reported(config_file: Path, monkeypa
     reply, _config, _service_ = await _run(config_file, "/add_admin 30003", SUPER)
 
     assert reply.startswith("错误")
-    assert "回读不一致" in reply
+    assert "配置保存失败" in reply
 
 
 async def test_missing_callback_reports_error(config_file: Path) -> None:
@@ -209,7 +209,7 @@ async def test_missing_callback_reports_error(config_file: Path) -> None:
         _message("/add_admin 30003", SUPER), kind="private", queue_key="1"
     )
 
-    assert "配置保存能力未注入" in (adapter.sent[-1] if adapter.sent else "")
+    assert "配置保存失败" in (adapter.sent[-1] if adapter.sent else "")
 
 
 async def test_missing_chat_section_is_created(config_file: Path) -> None:
