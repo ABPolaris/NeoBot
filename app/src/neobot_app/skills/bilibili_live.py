@@ -231,6 +231,7 @@ class BilibiliLiveSkill(SkillModule):
                         "room_id": room_id,
                         "name": str(room.get("name") or ""),
                         "auto_reply": bool(room.get("auto_reply")),
+                        "asr": bool(room.get("asr", False)),
                         "live": await live.is_live(room_id),
                         "schedules": live.list_schedules(room_id),
                     }
@@ -244,6 +245,7 @@ class BilibiliLiveSkill(SkillModule):
                 "enabled": rid in rooms,
                 "name": str(room.get("name") or ""),
                 "auto_reply": bool(room.get("auto_reply", False)),
+                "asr": bool(room.get("asr", False)),
                 "live": await live.is_live(rid),
                 "schedules": live.list_schedules(rid),
             }
