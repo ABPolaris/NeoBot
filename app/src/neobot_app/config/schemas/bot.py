@@ -1765,7 +1765,13 @@ class Bilibili:
     )
     dynamic_diary_time: str = field(
         default="22:30",
-        metadata={"description": "每日动态日记生成时间 HH:MM"},
+        metadata={"description": "每日动态日记的 summary 启动时间 HH:MM；summary 完成后等待 30 分钟再生成日记"},
+    )
+    dynamic_diary_requirement: str = field(
+        default="",
+        metadata={
+            "description": "额外日记要求；留空使用默认 COT/隐私规则。支持多行，写入日记 agent 的 <日记要求>"
+        },
     )
     cookie_file: str = field(
         default="data/bilibili/cookies.json",
