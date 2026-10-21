@@ -74,3 +74,12 @@ def test_archive_guide_uses_same_sections() -> None:
     assert "## Primary Request and Intent" in guide
     assert "## Critical Context" in guide
     assert "compaction engine" in guide
+
+
+
+@pytest.mark.asyncio
+async def test_compact_prompt_puts_source_before_instructions() -> None:
+    provider = _Provider()
+    await compact_messages(provider, _messages(), retain=4)
+    content = provider.calls[0][1]["content"]
+    assert content.index("message 0") < content.index("You are now acting as a compaction engine")
