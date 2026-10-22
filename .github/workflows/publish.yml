@@ -43,10 +43,23 @@ jobs:
               ...context.repo,
               commit_sha: context.sha,
             });
-            const merged = prs.some(pr => pr.merged_at &&
+            let found = prs.some(pr => pr.merged_at &&
               pr.base.ref === 'main' && pr.base.repo.full_name === `${context.repo.owner}/${context.repo.repo}` &&
               pr.merge_commit_sha === context.sha);
-            core.setOutput('merged', String(merged));
+            // 关联 API 在 push 刚发生时可能短暂查不到 squash 合并的 PR。
+            // 回退到 squash 标题里的 (#NN)，再向 PR API 核实 merged/main。
+            if (!found) {
+              const commit = await github.rest.repos.getCommit({ ...context.repo, ref: context.sha });
+              const message = commit.data.commit.message || '';
+              const match = message.match(/\(#(\d+)\)\s*$/);
+              if (match) {
+                const pr = await github.rest.pulls.get({ ...context.repo, pull_number: Number(match[1]) });
+                found = Boolean(pr.data.merged_at) &&
+                  pr.data.base.ref === 'main' &&
+                  pr.data.base.repo.full_name === `${context.repo.owner}/${context.repo.repo}`;
+              }
+            }
+            core.setOutput('merged', String(found));
 
   checks:
     name: 合并后质量门禁
