@@ -141,7 +141,7 @@ async def run_tool_reply(
         provider,
         toolset=toolset,
         include_builtin_tools=False,
-        max_iterations=3,
+        max_iterations=200,
         system_prompt=system,
     )
     state = await asyncio.wait_for(

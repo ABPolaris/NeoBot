@@ -118,7 +118,7 @@ async def run_diary_agent(
         provider,
         toolset=toolset,
         include_builtin_tools=False,
-        max_iterations=4,
+        max_iterations=200,
         system_prompt=system,
     )
     await asyncio.wait_for(

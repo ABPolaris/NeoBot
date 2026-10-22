@@ -3323,12 +3323,16 @@ class ReplyOrchestrator:
                         safe_result = _redacted_tool_text(result, _MAX_TOOL_LOG_CHARS)
                         result = _bounded_tool_text(result)
                     except asyncio.TimeoutError:
-                        tool_error = f"工具 {name} 执行超时"
+                        tool_error = (
+                            f"工具 {name} 执行超时"
+                            f"（已等待 {tool_timeout:.1f} 秒）"
+                        )
                         self._logger.warning(
                             "agent 工具调用超时",
                             event_id=event.event_id,
                             queue_key=queue_key,
                             tool=name,
+                            timeout_seconds=tool_timeout,
                         )
                         await self._emit_runtime_event(
                             "tool.call.after",
@@ -3340,9 +3344,6 @@ class ReplyOrchestrator:
                             tool_error=tool_error,
                             timed_out=True,
                         )
-                        if remaining is not None:
-                            cancel_for_silence(f"tool:{name}")
-                            return
                     except Exception as tool_exc:
                         # 保留失败原因：只记 error_type 的话，日志与模型都拿不到
                         # 真实原因（旧实现连 str(exc) 都没保留）。回给模型的文案
