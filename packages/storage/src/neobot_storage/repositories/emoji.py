@@ -16,6 +16,11 @@ from neobot_contracts.ports.emoji_access import EmojiAccess
 from neobot_storage.models import EmojiData
 
 
+def _effective_use_count():
+    """排序权重 = 实际发送次数 + 候选曝光分。"""
+    return EmojiData.use_count + EmojiData.exposure_score
+
+
 class SqlAlchemyEmojiAccess:
     """EmojiAccess 协议的 SqlAlchemy 实现。"""
 
@@ -151,7 +156,8 @@ class SqlAlchemyEmojiAccess:
     ) -> list[EmojiRecord]:
         stmt = select(EmojiData)
         if order_by_use_count:
-            stmt = stmt.order_by(EmojiData.use_count.asc(), EmojiData.file_name)
+            # 排序权重 = 实际发送次数 + 候选曝光分，与 EmojiService.effective_use_count 一致
+            stmt = stmt.order_by(_effective_use_count().asc(), EmojiData.file_name)
         else:
             stmt = stmt.order_by(EmojiData.file_name)
         stmt = stmt.offset(max(offset, 0)).limit(max(limit, 0))
@@ -175,7 +181,7 @@ class SqlAlchemyEmojiAccess:
                     EmojiData.file_name.like(pattern),
                 )
             )
-            .order_by(EmojiData.use_count.asc(), EmojiData.file_name)
+            .order_by(_effective_use_count().asc(), EmojiData.file_name)
             .offset(max(offset, 0))
             .limit(max(limit, 0))
         )
@@ -190,6 +196,27 @@ class SqlAlchemyEmojiAccess:
             .values(use_count=EmojiData.use_count + 1)
         )
         await self._session.execute(stmt)
+
+    async def add_exposure(self, file_hash: str, amount: float = 0.5) -> None:
+        """给候选曝光分累加（只影响排序，不改 use_count）。"""
+        stmt = (
+            update(EmojiData)
+            .where(EmojiData.file_hash == file_hash)
+            .values(exposure_score=EmojiData.exposure_score + amount)
+        )
+        await self._session.execute(stmt)
+
+    async def set_favorites(self, file_hashes: list[str]) -> None:
+        """整组替换爱用标记；空列表即清空。"""
+        await self._session.execute(
+            update(EmojiData).where(EmojiData.is_favorite.is_(True)).values(is_favorite=False)
+        )
+        if file_hashes:
+            await self._session.execute(
+                update(EmojiData)
+                .where(EmojiData.file_hash.in_(file_hashes))
+                .values(is_favorite=True)
+            )
 
     async def count(self) -> int:
         stmt = select(func.count()).select_from(EmojiData)
@@ -220,6 +247,8 @@ class SqlAlchemyEmojiAccess:
             analysis_text=row.analysis_text,
             use_count=row.use_count,
             image_source=row.image_source,
+            exposure_score=row.exposure_score,
+            is_favorite=bool(row.is_favorite),
             created_at=SqlAlchemyEmojiAccess._normalize_datetime(row.created_at),
             updated_at=SqlAlchemyEmojiAccess._normalize_datetime(row.updated_at),
             version=row.version,

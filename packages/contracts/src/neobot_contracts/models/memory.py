@@ -78,6 +78,10 @@ class EmojiRecord:
     updated_at: datetime
     version: int
     image_source: str | None = None
+    #: 候选曝光分：进入候选池但未被发送时累加（每次 0.5），只影响排序，不算真实使用
+    exposure_score: float = 0.0
+    #: 是否爱用：每轮表情包选择固定进入候选池
+    is_favorite: bool = False
 
 
 @dataclass(frozen=True, slots=True)

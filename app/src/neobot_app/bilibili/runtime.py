@@ -142,7 +142,7 @@ class BilibiliRuntime:
             willing_service=willing_service,
             flow_registry=flow_registry,
             mention_names=list(getattr(cfg, "live_interaction_mention_names", None) or []),
-            reply_chance=float(getattr(cfg, "live_interaction_reply_chance", 0.5) or 0.5),
+            reply_chance=float(getattr(cfg, "live_interaction_reply_chance", 0.15) or 0.15),
             asr_default_enabled=bool(getattr(cfg, "live_interaction_asr_enabled", False)),
             prompt_store=prompt_store,
             auto_look_enabled=bool(getattr(cfg, "live_interaction_auto_look_enabled", False)),
@@ -155,6 +155,58 @@ class BilibiliRuntime:
             self.service, self.engine, live_interactor=self.live_interactor
         )
         self._diary_task: asyncio.Task[None] | None = None
+
+    def apply_config(self, config: Any) -> None:
+        """热重载直播间与 B 站运行期配置；不重建连接。"""
+        self._config = config
+        cfg = getattr(config, "bilibili", None)
+        if cfg is None:
+            return
+        live = self.live_interactor
+        live._reply_chance = max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(cfg, "live_interaction_reply_chance", 0.15) or 0.15),
+            ),
+        )
+        live._cooldown = max(
+            0.0,
+            float(getattr(cfg, "live_interaction_cooldown_seconds", 5.0) or 0.0),
+        )
+        live._max_reply_chars = max(
+            1,
+            int(getattr(cfg, "live_interaction_max_reply_chars", 20) or 20),
+        )
+        live._asr_default_enabled = bool(
+            getattr(cfg, "live_interaction_asr_enabled", False)
+        )
+        live._auto_look_interval_minutes = max(
+            5,
+            int(getattr(cfg, "live_interaction_auto_look_interval_minutes", 30) or 30),
+        )
+        was_auto_look = live._auto_look_enabled
+        live._auto_look_enabled = bool(
+            getattr(cfg, "live_interaction_auto_look_enabled", False)
+        )
+        live._screenshot_replies = bool(
+            getattr(cfg, "live_interaction_screenshot_replies", False)
+        )
+        live._summary_every = max(
+            0, int(getattr(cfg, "live_interaction_summary_every", 200) or 0)
+        )
+        if was_auto_look != live._auto_look_enabled:
+            task = getattr(live, "_auto_look_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                live._auto_look_task = None
+            if live._auto_look_enabled and getattr(live, "_running", False):
+                import asyncio
+
+                live._auto_look_task = asyncio.create_task(
+                    live._auto_look_loop(), name="bilibili-live-auto-look"
+                )
+        self._logger.info("B站运行期配置已热更新")
 
     # ── 生命周期 ──
 
@@ -316,6 +368,23 @@ class BilibiliRuntime:
         """直播间交互命令；与 streaming_parser 监听插件完全独立。"""
         from neobot_app.commands.model import PERM_EVERYONE, PERM_SUB_ADMIN, Command
 
+        async def _send_live_card(
+            ctx: Any,
+            *,
+            title: str,
+            rows: list[tuple[str, str]],
+            fallback: str,
+        ) -> Any:
+            from neobot_app.commands.card import send_card
+
+            return await send_card(
+                ctx,
+                title=title,
+                blocks=[{"kind": "kv", "items": rows}],
+                fallback_text=fallback,
+                filename="bilibili-live-state.png",
+            )
+
         async def _toggle(ctx: Any) -> str:
             args = [str(a).strip() for a in (ctx.args or [])]
             if len(args) < 2:
@@ -330,12 +399,23 @@ class BilibiliRuntime:
                 result = await self.live_interactor.enable(room_id, auto_reply=True)
                 if not result.get("ok"):
                     return f"启用失败：{result.get('error') or '未知错误'}"
-                return (
-                    f"已启用直播间交互：{result.get('name') or room_id}（房间 {room_id}）。"
-                    "会自动监听弹幕，所有非空弹幕都会触发回复（5 秒冷却，不限于 @）。"
+                return await _send_live_card(
+                    ctx,
+                    title="直播互动状态",
+                    rows=[
+                        ("房间", f"{result.get('name') or room_id}（{room_id}）"),
+                        ("监听", "开"),
+                        ("自动回复", "开"),
+                    ],
+                    fallback=f"直播间 {room_id} 监听开，自动回复开",
                 )
             result = await self.live_interactor.disable(room_id)
-            return f"已{'停用' if result.get('ok') else '未启用'}直播间 {room_id}"
+            return await _send_live_card(
+                ctx,
+                title="直播互动状态",
+                rows=[("房间", room_id), ("监听", "关")],
+                fallback=f"直播间 {room_id} 监听关",
+            )
 
         async def _toggle_ai(ctx: Any) -> str:
             args = [str(a).strip() for a in (ctx.args or [])]
@@ -348,7 +428,12 @@ class BilibiliRuntime:
             result = await self.live_interactor.set_auto_reply(room_id, action)
             if not result.get("ok"):
                 return f"设置失败：{result.get('error') or '未知错误'}"
-            return f"直播间 {room_id} 自动回复已{'打开' if action else '关闭'}"
+            return await _send_live_card(
+                ctx,
+                title="直播互动状态",
+                rows=[("房间", room_id), ("自动回复", "开" if action else "关")],
+                fallback=f"直播间 {room_id} 自动回复{'开' if action else '关'}",
+            )
 
         async def _toggle_asr(ctx: Any) -> str:
             args = [str(a).strip() for a in (ctx.args or [])]
@@ -361,7 +446,12 @@ class BilibiliRuntime:
             result = await self.live_interactor.set_asr(room_id, action)
             if not result.get("ok"):
                 return f"设置失败：{result.get('error') or '未知错误'}"
-            return f"直播间 {room_id} ASR 已{'打开' if action else '关闭'}"
+            return await _send_live_card(
+                ctx,
+                title="直播互动状态",
+                rows=[("房间", room_id), ("ASR", "开" if action else "关")],
+                fallback=f"直播间 {room_id} ASR{'开' if action else '关'}",
+            )
 
         async def _list(ctx: Any) -> str:
             rooms = self.live_interactor.list_rooms()
@@ -591,3 +681,30 @@ def build_bilibili_skills(
             except Exception:
                 pass
     return skills
+
+class BilibiliRuntimeConfigConsumer:
+    """将 [bilibili] 段的热重载转给运行时。"""
+
+    name = "bilibili"
+
+    def __init__(self, runtime: BilibiliRuntime) -> None:
+        self._runtime = runtime
+
+    @property
+    def config_paths(self) -> tuple[str, ...]:
+        return ("bilibili",)
+
+    @property
+    def hot_reload_policies(self) -> tuple[Any, ...]:
+        from neobot_app.config.hot_reload import HotReloadRule
+
+        return (
+            HotReloadRule(
+                "bilibili",
+                True,
+                "B站/直播间运行期配置现取现用；连接与登录态不重建",
+            ),
+        )
+
+    async def apply_config(self, config: Any) -> None:
+        self._runtime.apply_config(config)

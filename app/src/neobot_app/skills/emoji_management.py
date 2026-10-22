@@ -34,7 +34,9 @@ class EmojiManagementSkill(SkillModule):
             "（支持消息编号 msg_number、聊天流 chat_flow_id、消息 ID message_id、"
             "本地路径 image_path、URL image_url、base64 image_base64，任选其一）\n"
             "  emoji_update — 更新表情包描述\n"
-            "  emoji_rename — 重命名表情包文件\n\n"
+            "  emoji_rename — 重命名表情包文件\n"
+            "  emoji_set_favorites — 设置爱用表情包（整组替换，空数组清空；"
+            "爱用每轮固定进入候选池）\n\n"
             "注意：表情包发送请在 sticker skill 中操作。表情包文件对沙箱/文件类子代理只读暴露，勿修改其文件。"
         )
 
@@ -127,6 +129,21 @@ class EmojiManagementSkill(SkillModule):
                     "required": ["emoji_id", "name"],
                 },
             ),
+            self._tool_def(
+                "emoji_set_favorites",
+                "设置爱用表情包（整组替换）：传入的编号成为全部爱用，空数组清空。"
+                "爱用表情包每轮固定进入候选池，数量有上限。",
+                {
+                    "properties": {
+                        "numbers": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "description": "爱用表情包编号列表；传空数组表示清空爱用",
+                        },
+                    },
+                    "required": ["numbers"],
+                },
+            ),
         ]
 
     async def execute(self, tool_name: str, args: dict[str, Any]) -> str:
@@ -136,6 +153,21 @@ class EmojiManagementSkill(SkillModule):
         return await handler(self, args)
 
 # ── Handlers ──
+
+def _entry_item(number: int, entry: Any) -> dict[str, Any]:
+    """条目 JSON：曝光分/爱用/排序权重与 EmojiService 保持一致。"""
+    use_count = int(getattr(entry, "use_count", 0) or 0)
+    exposure_score = float(getattr(entry, "exposure_score", 0.0) or 0.0)
+    return {
+        "number": number,
+        "file_name": entry.file_name,
+        "description": entry.analysis_text,
+        "use_count": use_count,
+        "exposure_score": exposure_score,
+        "is_favorite": bool(getattr(entry, "is_favorite", False)),
+        "effective_use_count": use_count + exposure_score,
+    }
+
 
 async def _handle_emoji_list(self: EmojiManagementSkill, args: dict) -> str:
     if self._emoji_service is None:
@@ -153,12 +185,7 @@ async def _handle_emoji_list(self: EmojiManagementSkill, args: dict) -> str:
         )
         items = []
         for number, entry in items_result:
-            item = {
-                "number": number,
-                "file_name": entry.file_name,
-                "description": entry.analysis_text,
-                "use_count": entry.use_count,
-            }
+            item = _entry_item(number, entry)
             if return_paths:
                 item["path"] = str(entry.file_path)
             items.append(item)
@@ -177,12 +204,7 @@ async def _handle_emoji_search(self: EmojiManagementSkill, args: dict) -> str:
         entries = self._emoji_service.search_entries(keyword)
         items = []
         for number, entry in entries:
-            item = {
-                "number": number,
-                "file_name": entry.file_name,
-                "description": entry.analysis_text,
-                "use_count": entry.use_count,
-            }
+            item = _entry_item(number, entry)
             if return_paths:
                 item["path"] = str(entry.file_path)
             items.append(item)
@@ -260,10 +282,27 @@ async def _handle_emoji_rename(self: EmojiManagementSkill, args: dict) -> str:
     except Exception as e:
         return _json({"ok": False, "error": str(e)})
 
+async def _handle_emoji_set_favorites(self: EmojiManagementSkill, args: dict) -> str:
+    if self._emoji_service is None:
+        return _json({"ok": False, "error": "emoji_service 未配置"})
+    raw_numbers = args.get("numbers")
+    if not isinstance(raw_numbers, list):
+        return _json({"ok": False, "error": "numbers 必须是整数数组"})
+    try:
+        numbers = [int(number) for number in raw_numbers]
+    except (TypeError, ValueError):
+        return _json({"ok": False, "error": "numbers 必须是整数数组"})
+    try:
+        result = await self._emoji_service.set_favorite_emojis(numbers)
+        return _json(result)
+    except Exception as e:
+        return _json({"ok": False, "error": str(e)})
+
 _HANDLERS = {
     "emoji_list": _handle_emoji_list,
     "emoji_search": _handle_emoji_search,
     "emoji_add": _handle_emoji_add,
     "emoji_update": _handle_emoji_update,
     "emoji_rename": _handle_emoji_rename,
+    "emoji_set_favorites": _handle_emoji_set_favorites,
 }

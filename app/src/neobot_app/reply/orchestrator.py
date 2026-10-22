@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import random
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -2010,7 +2011,6 @@ class ReplyOrchestrator:
         queue: MessageQueue,
         queue_key: str,
     ) -> None:
-        await self._maybe_trigger_sticker(queue, queue_key, event)
 
         last_reply_message_id, all_new = self._resolve_last_reply(queue, queue_key)
         role_messages = await self._build_role_messages(
@@ -2049,67 +2049,107 @@ class ReplyOrchestrator:
             event, reply_text, self_sent=self._self_sent_sink(queue, queue, queue_key)
         )
 
-    async def _maybe_trigger_sticker(
+    async def _maybe_prepare_emoji_choice(
         self,
-        queue: MessageQueue,
-        queue_key: str,
-        event: ReplyEvent | None = None,
+        event: ReplyEvent,
+        messages: list[dict],
+        vision_context: ReplyVisionContext,
     ) -> None:
-        """按配置概率随机发送一张表情包到当前会话。
+        """按概率准备一轮表情包选择：把候选图片直接注入上下文，由 agent 决定发不发。
 
-        后台通知（绘图完成、定时任务等）触发的管线不适用——没有用户交互上下文。
+        这里不再直接发送表情包。候选 = 固定爱用表情包 + 使用次数最少的随机槽位；
+        所有候选都记 0.5 次曝光，避免不合适的表情包反复占用上下文。
         """
-        import random
-
-        if event is not None and event.willing_decision is not None:
-            mgr = event.willing_decision.manager_name
-            if mgr in ("background_drawing", "scheduled_task"):
-                return
-
-        prob = (
-            getattr(self._config.chat, "random_sticker_probability", 0.1)
-            if self._config
-            else 0.1
-        )
-        try:
-            prob = float(prob)
-        except (TypeError, ValueError):
-            prob = 0.1
-        prob = max(0.0, min(1.0, prob))
-        if random.random() >= prob:
-            return
         if self._emoji_service is None or self._emoji_service.emoji_count == 0:
             return
         if event is None or event.conversation_ref is None:
             return
+        if event.willing_decision is not None:
+            if event.willing_decision.manager_name in ("background_drawing", "scheduled_task"):
+                return
+        if getattr(self._provider, "native_vision", False) is not True:
+            return
 
-        number = random.randint(1, self._emoji_service.emoji_count)
-        entry = self._emoji_service.get_entry(number)
-        if entry is None:
+        prob = 0.1
+        random_limit = 10
+        favorite_limit = 10
+        if self._config is not None:
+            try:
+                prob = float(getattr(self._config.chat, "random_sticker_probability", 0.1))
+            except (TypeError, ValueError):
+                prob = 0.1
+            try:
+                random_limit = int(
+                    getattr(self._config.chat, "emoji_random_candidate_count", 10)
+                )
+            except (TypeError, ValueError):
+                random_limit = 10
+            try:
+                favorite_limit = int(
+                    getattr(self._config.chat, "emoji_favorite_limit", 10)
+                )
+            except (TypeError, ValueError):
+                favorite_limit = 10
+        if random.random() >= max(0.0, min(1.0, prob)):
             return
 
         try:
-            await send_image(
-                self._file_server,
-                self._adapter,
-                event.conversation_ref,
-                entry.file_path,
-                wait_response=False,
-            )
-            # 记录表情包使用次数
-            await self._emoji_service.record_usage(number)
-            self._logger.debug(
-                "已随机发送表情包",
-                event_id=event.event_id,
-                number=number,
-                file=entry.file_name,
+            candidates = self._emoji_service.pick_context_candidates(
+                random_limit=max(1, random_limit),
+                favorite_limit=max(0, favorite_limit),
             )
         except Exception as exc:
-            self._logger.debug(
-                "随机表情包发送失败",
-                event_id=event.event_id,
-                error=str(exc),
+            self._logger.warning("准备表情包候选失败", error=str(exc))
+            return
+        if not candidates:
+            return
+
+        from neobot_app.image.parser import _build_vision_image_part
+
+        parts: list[dict] = []
+        numbers: list[int] = []
+        labels: list[str] = []
+        for number, entry in candidates:
+            try:
+                image_part = _build_vision_image_part(
+                    entry.file_path.read_bytes(), logger=self._logger
+                )
+            except Exception as exc:
+                self._logger.debug("表情包候选图片读取失败", number=number, error=str(exc))
+                continue
+            numbers.append(number)
+            favourite = "（爱用）" if getattr(entry, "is_favorite", False) else ""
+            label = (
+                f"[表情包候选] 编号 {number}{favourite}："
+                f"{entry.analysis_text or entry.file_name}"
             )
+            labels.append(label)
+            parts.extend([{"type": "text", "text": label}, image_part])
+        if not parts:
+            return
+
+        vision_context.manual_parts.extend(parts)
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "[表情包选择] 你觉得现在发一张表情包比较合适。"
+                    "下面是候选表情包的编号和图片；可以用 send_emoji 工具选择一张发出去，"
+                    "如果觉得没有合适的，就不要发表情包，继续正常回复。"
+                    "候选编号：" + "、".join(str(n) for n in numbers) + "。"
+                ),
+            }
+        )
+        try:
+            await self._emoji_service.record_candidate_round(numbers)
+        except Exception as exc:
+            self._logger.warning("记录表情包候选曝光失败", error=str(exc))
+        self._logger.info(
+            "表情包选择上下文已注入",
+            event_id=event.event_id,
+            candidates=numbers,
+            favourite=sum(1 for entry in candidates if getattr(entry, "is_favorite", False)),
+        )
 
     # ── Agent 模式 ──
 
@@ -2248,8 +2288,6 @@ class ReplyOrchestrator:
         from neobot_app.message.numbering import MessageNumbering
         from neobot_app.reply.tools import build_reply_toolset
 
-        # 随机触发表情包发送
-        await self._maybe_trigger_sticker(queue, queue_key, event)
 
         # 带上 bot_account：wait/增量注入等文本渲染路径需要判断「这条是不是我自己发的」，
         # 以免把自己的历史发言渲染成「编号: 发送者: 正文」再次示范脏格式。
@@ -2808,6 +2846,8 @@ class ReplyOrchestrator:
             group_message_queue=queue_copy if conv_kind == "group" else None,
             friend_message_queue=queue_copy if conv_kind != "group" else None,
         )
+
+        await self._maybe_prepare_emoji_choice(event, messages, vision_context)
 
         # 5. Agent 循环（外层 while 支持私聊连续会话）
         max_iterations = self._get_agent_max_iterations()

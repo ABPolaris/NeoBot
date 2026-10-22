@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from neobot_app.prompt.render import render_template
 from neobot_app.time_context import get_current_time_values
 
 #: B站场景的通用风格规则（评论与私信共用）。
@@ -429,11 +430,18 @@ class LiveDanmakuContext:
     viewer_memory: str = ""
 
 
+def _render_live_persona(live_persona: str, ctx: LiveDanmakuContext) -> str:
+    if not live_persona.strip():
+        return ""
+    return render_template(
+        live_persona, {"bot_name": ctx.bot_name or "你", "bot_data": ctx.bot_data}
+    ).strip()
+
 def build_live_danmaku_prompt(
     ctx: LiveDanmakuContext, live_persona: str = ""
 ) -> tuple[str, str]:
     """组装直播间弹幕的 system/user；live_chat 配了独立人格就用它。"""
-    system = live_persona.strip() or "\n".join(
+    system = _render_live_persona(live_persona, ctx) or "\n".join(
         [
             _identity(ctx.bot_name, 0, ctx.bot_data, ""),
             LIVE_DANMAKU_ADJUST,
@@ -460,7 +468,7 @@ def build_live_scheduled_prompt(
     ctx: LiveDanmakuContext, live_persona: str = ""
 ) -> tuple[str, str]:
     """组装直播间主动定时弹幕的 system/user。"""
-    system = live_persona.strip() or "\n".join(
+    system = _render_live_persona(live_persona, ctx) or "\n".join(
         [
             _identity(ctx.bot_name, 0, ctx.bot_data, ""),
             LIVE_DANMAKU_ADJUST,
@@ -486,7 +494,7 @@ def build_live_observation_prompt(
     ctx: LiveDanmakuContext, live_persona: str = ""
 ) -> tuple[str, str]:
     """组装主动观察直播画面的 system/user；允许 cancel。"""
-    system = live_persona.strip() or "\n".join(
+    system = _render_live_persona(live_persona, ctx) or "\n".join(
         [
             _identity(ctx.bot_name, 0, ctx.bot_data, ""),
             LIVE_DANMAKU_ADJUST,

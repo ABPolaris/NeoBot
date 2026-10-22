@@ -234,19 +234,18 @@ def _manager(
     return manager
 
 
-async def test_explicit_deepseek_failure_falls_back_to_bing() -> None:
+async def test_explicit_deepseek_failure_does_not_fall_back_to_free() -> None:
     deepseek = _FakeEngine("deepseek", [_quota_fail()])
     bing = _FakeEngine("bing", [_ok("bing")])
     manager = _manager([deepseek, bing], deepseek_enabled=True, deepseek_api_key="sk")
 
     resp = await manager.search_with_fallback("q", engine="deepseek")
 
-    assert resp.success is True
-    assert resp.engine == "bing"
+    assert resp.success is False
+    assert resp.engine == "all"
     assert deepseek.calls == 1
-    assert resp.signals["deepseek_unavailable"] is True
-    assert "额度不足" in resp.signals["fallback_reason"]
-    assert [stage["stage"] for stage in resp.signals["stages"]] == ["deepseek", "bing"]
+    assert bing.calls == 0, "有 DeepSeek Key 时，显式 deepseek 失败不再回退免费渠道"
+    assert [stage["stage"] for stage in resp.signals["stages"]] == ["deepseek"]
 
 
 async def test_hidden_deepseek_is_skipped_without_request() -> None:
@@ -260,24 +259,24 @@ async def test_hidden_deepseek_is_skipped_without_request() -> None:
     resp = await manager.search_with_fallback("q", engine="deepseek")
 
     assert deepseek.calls == 0, "已隐藏的引擎不应再发请求"
-    assert resp.engine == "bing"
-    assert resp.degraded is True, "走过 deepseek 不可用回退必须标记 degraded"
+    assert resp.engine == "all"
+    assert resp.degraded is True
+    assert bing.calls == 0, "有 Key 但额度不足时不回退免费渠道"
     assert resp.signals["deepseek_unavailable"] is True
-    assert resp.signals["stages"][0]["kind"] == "unavailable"
     assert "deepseek" not in manager.available_engines
 
 
-async def test_auto_never_calls_deepseek() -> None:
+async def test_auto_uses_deepseek_by_default() -> None:
     deepseek = _FakeEngine("deepseek", [_ok("deepseek")])
     bing = _FakeEngine("bing", [_ok("bing")])
     manager = _manager([deepseek, bing], deepseek_enabled=True, deepseek_api_key="sk")
 
     resp = await manager.search_with_fallback("q")
 
-    assert resp.engine == "bing"
-    assert deepseek.calls == 0
-    assert "deepseek" not in [stage["stage"] for stage in resp.signals["stages"]]
-    assert "deepseek" in manager.available_engines, "可用状态可以显示，但 auto 不调用"
+    assert resp.engine == "deepseek"
+    assert deepseek.calls == 1
+    assert bing.calls == 0
+    assert [stage["stage"] for stage in resp.signals["stages"]] == ["deepseek"]
 
 
 def test_key_presence_enables_deepseek_unless_explicitly_disabled() -> None:
@@ -310,10 +309,10 @@ def test_search_tool_exposes_engine_enum_and_paid_description() -> None:
     engine = function["parameters"]["properties"]["engine"]
 
     assert engine["enum"] == ["auto", "bing", "duckduckgo", "deepseek"]
+    assert "DeepSeek" in engine["description"]
     assert "免费" in engine["description"]
-    assert "按次计费" in engine["description"]
-    assert "回退旧实现" in engine["description"]
-    assert "按次计费" in function["description"]
+    assert "缺少" in engine["description"]
+    assert "DeepSeek" in function["description"]
 
 
 class _RecordingSession:

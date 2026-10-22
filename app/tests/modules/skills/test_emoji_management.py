@@ -10,12 +10,20 @@ from neobot_app.emoji.service import EmojiDuplicateError
 from neobot_app.skills.emoji_management import EmojiManagementSkill
 
 
-def _entry(file_name: str = "cat.png", analysis_text: str = "猫猫", use_count: int = 3):
+def _entry(
+    file_name: str = "cat.png",
+    analysis_text: str = "猫猫",
+    use_count: int = 3,
+    exposure_score: float = 0.0,
+    is_favorite: bool = False,
+):
     return SimpleNamespace(
         file_name=file_name,
         analysis_text=analysis_text,
         use_count=use_count,
         file_path=f"/emoji/{file_name}",
+        exposure_score=exposure_score,
+        is_favorite=is_favorite,
     )
 
 
@@ -28,6 +36,8 @@ class FakeEmojiService:
         self.add_calls: list[dict] = []
         self.update_calls: list[tuple[int, str]] = []
         self.rename_calls: list[tuple[int, str]] = []
+        self.favorite_calls: list[list[int]] = []
+        self.favorite_result: dict[str, Any] | None = None
         self.entries: list[tuple[int, Any]] = []
         self.total = 0
         self.has_more = False
@@ -59,6 +69,12 @@ class FakeEmojiService:
     async def rename_entry(self, emoji_id: int, name: str) -> Any:
         self.rename_calls.append((emoji_id, name))
         return SimpleNamespace(file_name=name)
+
+    async def set_favorite_emojis(self, numbers: list[int]) -> dict:
+        self.favorite_calls.append(list(numbers))
+        if self.favorite_result is not None:
+            return self.favorite_result
+        return {"ok": True, "favorites": list(numbers), "count": len(numbers), "limit": 10}
 
 
 def _parse(text: str) -> dict:
@@ -290,11 +306,93 @@ async def test_missing_service_rejected():
         ("emoji_add", {"image_path": "x.png"}),
         ("emoji_update", {"emoji_id": 1, "description": "x"}),
         ("emoji_rename", {"emoji_id": 1, "name": "y"}),
+        ("emoji_set_favorites", {"numbers": []}),
     ):
         result = _parse(await skill.execute(tool, args))
 
         assert result["ok"] is False
         assert "emoji_service 未配置" in result["error"]
+
+
+async def test_emoji_list_includes_effective_use_count_and_favorite():
+    """emoji_list 条目应带曝光分/爱用/排序权重，供模型判断候选。"""
+    service = FakeEmojiService()
+    service.entries = [(1, _entry(use_count=2, exposure_score=1.5, is_favorite=True))]
+    skill = _make_skill(service)
+
+    result = _parse(await skill.execute("emoji_list", {}))
+
+    item = result["items"][0]
+    assert item["use_count"] == 2
+    assert item["exposure_score"] == 1.5
+    assert item["is_favorite"] is True
+    assert item["effective_use_count"] == 3.5
+
+
+async def test_emoji_search_includes_favorite_flag():
+    """emoji_search 条目同样带爱用标记。"""
+    service = FakeEmojiService()
+    service.entries = [(3, _entry(is_favorite=True))]
+    skill = _make_skill(service)
+
+    result = _parse(await skill.execute("emoji_search", {"keyword": "猫"}))
+
+    assert result["items"][0]["is_favorite"] is True
+    assert result["items"][0]["effective_use_count"] == 3.0
+
+
+async def test_emoji_set_favorites_replaces_group():
+    """正常路径：numbers 原样传给服务，返回整组替换结果。"""
+    service = FakeEmojiService()
+    skill = _make_skill(service)
+
+    result = _parse(await skill.execute("emoji_set_favorites", {"numbers": [3, 1]}))
+
+    assert service.favorite_calls == [[3, 1]]
+    assert result["ok"] is True
+    assert result["favorites"] == [3, 1]
+
+
+async def test_emoji_set_favorites_empty_list_clears():
+    """边界：空数组表示清空爱用，仍应调用服务。"""
+    service = FakeEmojiService()
+    skill = _make_skill(service)
+
+    result = _parse(await skill.execute("emoji_set_favorites", {"numbers": []}))
+
+    assert service.favorite_calls == [[]]
+    assert result["ok"] is True
+    assert result["favorites"] == []
+
+
+async def test_emoji_set_favorites_rejects_bad_numbers():
+    """异常路径：numbers 不是整数数组时拒绝，不调用服务。"""
+    service = FakeEmojiService()
+    skill = _make_skill(service)
+
+    for args in ({"numbers": "3"}, {"numbers": [1, "x"]}, {}):
+        result = _parse(await skill.execute("emoji_set_favorites", args))
+
+        assert result["ok"] is False
+        assert "整数数组" in result["error"]
+    assert service.favorite_calls == []
+
+
+async def test_emoji_set_favorites_passes_service_error_through():
+    """异常路径：服务的校验错误（非法编号/超上限）原样返回。"""
+    service = FakeEmojiService()
+    service.favorite_result = {
+        "ok": False,
+        "error": "表情包编号不存在: [99]",
+        "invalid_numbers": [99],
+    }
+    skill = _make_skill(service)
+
+    result = _parse(await skill.execute("emoji_set_favorites", {"numbers": [99]}))
+
+    assert result["ok"] is False
+    assert "99" in result["error"]
+    assert service.favorite_calls == [[99]]
 
 
 async def test_unknown_tool_returns_error():
