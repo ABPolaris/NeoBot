@@ -1708,12 +1708,12 @@ class WebSearchConfig:
         },
     )
     deepseek_enabled: bool = field(
-        default=False,
+        default=True,
         metadata={
             "description": (
-                "是否允许使用 DeepSeek Search 付费 API（默认关闭）。"
-                "开启后搜索工具仍默认走免费的 Bing/DDG；只有显式 engine=deepseek 才使用；"
-                "额度不足/Key 无效时自动隐藏并回退旧实现。Key 复用 env 的 DeepSeek_APIKey。"
+                "是否允许 DeepSeek 搜索（默认开启）。auto 默认优先 DeepSeek；"
+                "只有显式指定 engine=bing/duckduckgo、缺少 DeepSeek_APIKey、"
+                "或本项为 false 时才走免费链路。Key 复用 env 的 DeepSeek_APIKey。"
             )
         },
     )
@@ -1830,11 +1830,11 @@ class Bilibili:
         },
     )
     live_interaction_reply_chance: float = field(
-        default=0.5,
+        default=0.15,
         metadata={
             "description": (
                 "直播间普通弹幕的基础回复概率（0-1）；被@/叫名字仍按 at_mention_guaranteed_reply 必回。"
-                "默认 0.5，最终概率还会乘群聊意愿系数。"
+                "默认 0.15，最终概率还会乘群聊/会话/用户意愿系数。"
             )
         },
     )
@@ -2067,6 +2067,20 @@ class EnhancedChat(Chat):
     emoji_page_size: Optional[int] = field(
         default=50,
         metadata={"description": "表情包列表每页显示数量；总数超过此值时分页展示，agent 可使用翻页参数查看"},
+    )
+    emoji_random_candidate_count: Optional[int] = field(
+        default=10,
+        metadata={
+            "description": "每轮表情包选择注入的随机候选数量；从使用次数最少（真实发送+候选曝光）"
+            "的非爱用表情包中取，爱用表情包不占这些槽位"
+        },
+    )
+    emoji_favorite_limit: Optional[int] = field(
+        default=10,
+        metadata={
+            "description": "爱用表情包数量上限；爱用表情包每轮固定进入候选池，"
+            "设置爱用时最多可选这么多张"
+        },
     )
     enable_last_reply_tracking: Optional[bool] = field(
         default=True,

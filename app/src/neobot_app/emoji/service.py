@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +33,15 @@ class EmojiEntry:
     image_source: str | None = None
     created_at: Any = None
     updated_at: Any = None
+    #: 候选曝光分：进入候选池但未被发送时累加，只影响排序
+    exposure_score: float = 0.0
+    #: 爱用：每轮表情包选择固定进入候选池
+    is_favorite: bool = False
+
+    @property
+    def effective_use_count(self) -> float:
+        """排序权重 = 实际发送次数 + 候选曝光分。"""
+        return self.use_count + self.exposure_score
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +81,8 @@ class EmojiService:
     )
     _EMOJI_DIR_NAME = "emoji"
     _REFRESH_INTERVAL_SECONDS = 300
+    #: 候选曝光分：被选进候选池但未发送时的一次记数
+    _CANDIDATE_EXPOSURE = 0.5
 
     def __init__(
         self,
@@ -80,6 +92,7 @@ class EmojiService:
         vision_provider: Provider | None = None,
         max_concurrency: int = 20,
         page_size: int = 50,
+        favorite_limit: int = 10,
         logger: Logger | None = None,
         adapter: Any = None,
         file_server: Any = None,
@@ -89,6 +102,7 @@ class EmojiService:
         self._vision_provider = vision_provider
         self._max_concurrency = max_concurrency
         self._page_size = page_size
+        self._favorite_limit = max(int(favorite_limit), 0)
         self._logger = logger or NullLogger()
         self._entries: dict[int, EmojiEntry] = {}
         self._next_number: int = 1
@@ -126,6 +140,10 @@ class EmojiService:
     def page_size(self) -> int:
         return self._page_size
 
+    @property
+    def favorite_limit(self) -> int:
+        return self._favorite_limit
+
     def get_entry(self, number: int) -> EmojiEntry | None:
         self._notify_disk_changed()
         return self._entries.get(number)
@@ -139,9 +157,11 @@ class EmojiService:
         return None
 
     def list_entries(self) -> list[tuple[int, EmojiEntry]]:
-        """返回所有表情包，按使用次数从少到多排列。"""
+        """返回所有表情包，按 effective_use_count（实际发送 + 候选曝光）从少到多排列。"""
         self._notify_disk_changed()
-        sorted_entries = sorted(self._entries.items(), key=lambda item: item[1].use_count)
+        sorted_entries = sorted(
+            self._entries.items(), key=lambda item: item[1].effective_use_count
+        )
         return sorted_entries
 
     def list_entries_paginated(
@@ -155,7 +175,9 @@ class EmojiService:
         """
         self._notify_disk_changed()
         limit = limit if limit is not None else self._page_size
-        sorted_entries = sorted(self._entries.items(), key=lambda item: item[1].use_count)
+        sorted_entries = sorted(
+            self._entries.items(), key=lambda item: item[1].effective_use_count
+        )
         total = len(sorted_entries)
         page = sorted_entries[offset : offset + limit]
         has_more = offset + limit < total
@@ -170,7 +192,7 @@ class EmojiService:
         for number, entry in self._entries.items():
             if kw in entry.analysis_text.lower() or kw in entry.file_name.lower():
                 matches.append((number, entry))
-        matches.sort(key=lambda item: item[1].use_count)
+        matches.sort(key=lambda item: item[1].effective_use_count)
         return matches[:limit]
 
     def build_list_text(
@@ -178,9 +200,9 @@ class EmojiService:
         offset: int = 0,
         limit: int | None = None,
     ) -> str:
-        """构建表情包清单文本（list_emojis 工具的返回值），按使用次数从少到多排列。
+        """构建表情包清单文本（list_emojis 工具的返回值），按 effective_use_count 从少到多排列。
 
-        格式为 [编号]: [表情包：描述 | 已用N次]；超出本页时附带翻页提示。
+        格式为 [编号]: [爱用][表情包：描述 | 已用N次]；超出本页时附带翻页提示。
         只作为工具结果按需返回，不再注入系统提示词——用量后缀与排序会随使用次数变化，
         放进 system 前缀会让整段缓存失效。
         """
@@ -188,13 +210,18 @@ class EmojiService:
         if not self._entries:
             return ""
         limit = limit if limit is not None else self._page_size
-        sorted_entries = sorted(self._entries.items(), key=lambda item: item[1].use_count)
+        sorted_entries = sorted(
+            self._entries.items(), key=lambda item: item[1].effective_use_count
+        )
         page = sorted_entries[offset : offset + limit]
 
         lines: list[str] = []
         for number, entry in page:
             usage_info = f" | 已用{entry.use_count}次" if entry.use_count > 0 else ""
-            lines.append(f"[{number}]: [表情包：{entry.analysis_text}{usage_info}]")
+            favorite_mark = "[爱用]" if entry.is_favorite else ""
+            lines.append(
+                f"[{number}]: {favorite_mark}[表情包：{entry.analysis_text}{usage_info}]"
+            )
 
         total = len(sorted_entries)
         header = f"共{total}个表情包"
@@ -262,17 +289,113 @@ class EmojiService:
             self._logger.warning(f"记录表情包使用次数失败 #{number}: {exc}")
             return
 
-        # 更新内存中的计数
-        self._entries[number] = EmojiEntry(
-            file_name=entry.file_name,
-            file_path=entry.file_path,
-            analysis_text=entry.analysis_text,
-            use_count=entry.use_count + 1,
-            file_hash=entry.file_hash,
-            image_source=entry.image_source,
-            created_at=entry.created_at,
-            updated_at=entry.updated_at,
+        # 更新内存中的计数（只动 use_count，曝光分与爱用标记原样保留）
+        self._entries[number] = replace(entry, use_count=entry.use_count + 1)
+
+    def pick_context_candidates(
+        self,
+        random_limit: int = 10,
+        favorite_limit: int = 10,
+    ) -> list[tuple[int, EmojiEntry]]:
+        """挑选一轮表情包候选：爱用组在前，随机组在后。
+
+        - 爱用：最多 favorite_limit 个，按 effective_use_count 从少到多；
+        - 随机：非爱用里 effective_use_count 最低的 random_limit 个。
+        两组天然不重叠（爱用不占随机槽位）；没有爱用时只返回随机组。
+        """
+        self._notify_disk_changed()
+        ordered = sorted(
+            self._entries.items(), key=lambda item: item[1].effective_use_count
         )
+        favorites = [
+            (number, entry) for number, entry in ordered if entry.is_favorite
+        ][: max(int(favorite_limit), 0)]
+        random_slots = [
+            (number, entry) for number, entry in ordered if not entry.is_favorite
+        ][: max(int(random_limit), 0)]
+        return favorites + random_slots
+
+    async def record_candidate_round(
+        self,
+        numbers: Sequence[int],
+        selected: int | None = None,
+    ) -> None:
+        """给本轮候选各记 0.5 次曝光，selected 照记。
+
+        真实发送次数仍只由 record_usage 负责：进过候选但没发出去的不算「用过」。
+        """
+        _ = selected  # 契约参数：本轮候选无论是否最终选中都记同样曝光
+        targets = [
+            (number, self._entries[number])
+            for number in dict.fromkeys(numbers)
+            if number in self._entries
+        ]
+        if not targets:
+            return
+        try:
+            async with self._uow_factory() as uow:
+                for _, entry in targets:
+                    file_hash = entry.file_hash or _file_hash_sync(entry.file_path)
+                    if file_hash:
+                        await uow.emojis.add_exposure(
+                            file_hash, self._CANDIDATE_EXPOSURE
+                        )
+                await uow.commit()
+        except Exception as exc:
+            self._logger.warning(f"记录表情包候选曝光失败: {exc}")
+            return
+        for number, entry in targets:
+            self._entries[number] = replace(
+                entry,
+                exposure_score=entry.exposure_score + self._CANDIDATE_EXPOSURE,
+            )
+
+    async def set_favorite_emojis(self, numbers: Sequence[int]) -> dict[str, Any]:
+        """整组替换爱用表情包；空列表清空。
+
+        返回 {"ok": True, "favorites": [...]} 或 {"ok": False, "error": ...}；
+        编号不存在或超过 favorite_limit 时不改任何状态。
+        """
+        self._notify_disk_changed()
+        unique = list(dict.fromkeys(numbers))
+        invalid = [number for number in unique if number not in self._entries]
+        if invalid:
+            return {
+                "ok": False,
+                "error": f"表情包编号不存在: {invalid}",
+                "invalid_numbers": invalid,
+            }
+        if len(unique) > self._favorite_limit:
+            return {
+                "ok": False,
+                "error": f"爱用表情包最多 {self._favorite_limit} 个，收到 {len(unique)} 个",
+            }
+
+        hashes: list[str] = []
+        for number in unique:
+            entry = self._entries[number]
+            file_hash = entry.file_hash or _file_hash_sync(entry.file_path)
+            if not file_hash:
+                return {"ok": False, "error": f"无法读取表情包文件: {entry.file_name}"}
+            hashes.append(file_hash)
+
+        try:
+            async with self._uow_factory() as uow:
+                await uow.emojis.set_favorites(hashes)
+                await uow.commit()
+        except Exception as exc:
+            self._logger.warning(f"保存爱用表情包失败: {exc}")
+            return {"ok": False, "error": f"保存爱用表情包失败: {exc}"}
+
+        favorite_numbers = set(unique)
+        for number, entry in self._entries.items():
+            self._entries[number] = replace(entry, is_favorite=number in favorite_numbers)
+        return {
+            "ok": True,
+            "favorites": unique,
+            "count": len(unique),
+            "limit": self._favorite_limit,
+        }
 
     async def start(self) -> None:
         """启动时扫描表情包文件夹"""
@@ -429,6 +552,8 @@ class EmojiService:
             image_source=entry.image_source,
             created_at=entry.created_at,
             updated_at=entry.updated_at,
+            exposure_score=entry.exposure_score,
+            is_favorite=entry.is_favorite,
         )
 
     async def update_emoji_source(self, number: int, image_source: str) -> EmojiRecord | None:
@@ -504,6 +629,8 @@ class EmojiService:
             image_source=renamed.image_source,
             created_at=renamed.created_at,
             updated_at=renamed.updated_at,
+            exposure_score=renamed.exposure_score,
+            is_favorite=renamed.is_favorite,
         )
         self._entries[number] = updated
         return updated
@@ -779,6 +906,16 @@ class EmojiService:
                         if record is not None
                         else getattr(old_entry, "updated_at", None)
                     ),
+                    exposure_score=(
+                        record.exposure_score
+                        if record is not None
+                        else getattr(old_entry, "exposure_score", 0.0)
+                    ),
+                    is_favorite=(
+                        record.is_favorite
+                        if record is not None
+                        else getattr(old_entry, "is_favorite", False)
+                    ),
                 )
                 if num > max_existing_number:
                     max_existing_number = num
@@ -814,6 +951,16 @@ class EmojiService:
                         record.updated_at
                         if record is not None
                         else getattr(old_entry, "updated_at", None)
+                    ),
+                    exposure_score=(
+                        record.exposure_score
+                        if record is not None
+                        else getattr(old_entry, "exposure_score", 0.0)
+                    ),
+                    is_favorite=(
+                        record.is_favorite
+                        if record is not None
+                        else getattr(old_entry, "is_favorite", False)
                     ),
                 )
 
@@ -903,13 +1050,10 @@ class EmojiService:
             if path in known:
                 continue
             text = _read_sidecar_text(path) or "[待解析]"
-            try:
-                # 这里只需要 file_hash（prepare_local_image 定义它就是原始字节的
-                # sha256），直接算哈希即可：避免在同步路径上做 PIL 解码+缩放。
-                # 本函数由 _notify_disk_changed 从同步访问器调用，不能 await。
-                file_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-            except Exception:
-                file_hash = ""
+            # 只需要 file_hash（prepare_local_image 定义它就是原始字节的 sha256），
+            # 直接算哈希即可：避免在同步路径上做 PIL 解码+缩放。本函数由
+            # _notify_disk_changed 从同步访问器调用，不能 await。
+            file_hash = _file_hash_sync(path)
             number = self._next_number
             self._next_number += 1
             self._entries[number] = EmojiEntry(
@@ -940,6 +1084,14 @@ class EmojiService:
             raise
         except Exception as exc:
             self._logger.error(f"表情包即时刷新失败: {exc}")
+
+
+def _file_hash_sync(path: Path) -> str:
+    """同步算文件 sha256（读不到时返回空串）。"""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except Exception:
+        return ""
 
 
 def _detect_image_suffix(image_bytes: bytes) -> str:

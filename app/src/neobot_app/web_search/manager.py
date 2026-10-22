@@ -50,8 +50,8 @@ class SearchManager:
     ) -> None:
         """
         Args:
-            engines: 按顺序使用的引擎名称列表（第一个为主引擎）。
-                     默认: ["bing", "duckduckgo"]
+            engines: 免费引擎顺序；只有显式指定免费引擎、缺少 DeepSeek Key
+                     或 deepseek_enabled=false 时使用。默认: ["bing", "duckduckgo"]
             min_delay: 同一引擎两次请求之间的最小间隔秒数。
             max_retries: 同一引擎的最大重试次数。默认 1（不是 3）：实测 7 条错配
                 查询各重试 3 次**自愈 0/21**，重试只会浪费时间并加剧风控；
@@ -62,8 +62,8 @@ class SearchManager:
             engine_budgets: 每级的时间预算（秒）。默认 duckduckgo=15s（部署实测它慢，
                 因此给固定上限而不是无限等）。
             browser_channel: 注入用（测试）；默认用进程级单例。
-            deepseek_enabled: 是否允许显式使用 DeepSeek 付费搜索；None 表示
-                按是否提供 deepseek_api_key 自动判断。
+            deepseek_enabled: 是否允许 DeepSeek 搜索；None 表示按 key 判断。
+                默认 true 时 auto 优先 DeepSeek；false 强制免费链路。
             deepseek_api_key: DeepSeek API Key；缺省时 DeepSeek 不可用。
             deepseek_base_url: DeepSeek API 根地址，空串用官方默认值。
             deepseek_timeout_seconds: DeepSeek 单次请求超时。
@@ -72,8 +72,8 @@ class SearchManager:
         if engines is None:
             engines = ["bing", "duckduckgo"]
         names = [str(name) for name in engines]
-        # DeepSeek 是付费 API，且不在 auto 默认链里：只有显式 engine="deepseek"
-        # 才会走它。即使配置把它写进 engines，auto 也仍走旧的免费链路。
+        # 默认（auto）优先 DeepSeek；只有显式指定免费引擎或缺少 DeepSeek Key
+        # 时才走旧的免费链路。关闭 deepseek_enabled 也会强制走免费链路。
         self._deepseek_api_key = str(deepseek_api_key or "").strip()
         self._deepseek_enabled = (
             bool(self._deepseek_api_key)
@@ -147,9 +147,10 @@ class SearchManager:
     @property
     def available_engines(self) -> list[str]:
         """当前可用的引擎名；DeepSeek 不可用（未配置/额度不足）时不出现在这里。"""
-        names = list(dict.fromkeys([*self._engine_names, *self._degraded_engines]))
+        names: list[str] = []
         if self.deepseek_available:
             names.append("deepseek")
+        names.extend(dict.fromkeys([*self._engine_names, *self._degraded_engines]))
         return names
 
     def _lock_for(self, engine_name: str) -> asyncio.Lock:
@@ -189,7 +190,9 @@ class SearchManager:
         if num_results is None:
             num_results = self._default_num_results
 
-        engine_name = engine or self._engine_names[0]
+        engine_name = engine or (
+            "deepseek" if self.deepseek_available else self._engine_names[0]
+        )
         if engine_name == "deepseek" and not self.deepseek_available:
             reason = self.deepseek_unavailable_reason or "不可用"
             return SearchResponse(
@@ -260,9 +263,8 @@ class SearchManager:
     ) -> SearchResponse:
         """依次搜索各引擎，失败时自动回退。
 
-        显式 engine 放在第一级（目前用于 deepseek）；auto（None）只走旧的免费链路
-        （Bing → 浏览器 → DDG），DeepSeek 永不在默认链里。显式 deepseek 不可用/
-        失败时继续走旧链路，并在 signals 里标注 deepseek_unavailable / fallback_reason。
+        默认（auto）优先 DeepSeek；只有显式指定免费引擎或缺少 DeepSeek Key 时才走
+        Bing → 浏览器 → DDG。auto 有 Key 时不回退免费渠道（按配置语义）。
         """
         if num_results is None:
             num_results = self._default_num_results
@@ -333,18 +335,29 @@ class SearchManager:
             degraded = True
             return None
 
-        # 显式 deepseek：不可用就直接记一级，不再发无意义的付费请求。
-        order = list(self._engine_names)
-        if engine == "deepseek":
-            if self.deepseek_available:
-                order.insert(0, "deepseek")
+        free_order = list(dict.fromkeys(self._engine_names))
+        allow_free = False
+        deepseek_configured = bool(self._deepseek_enabled and self._deepseek_api_key)
+        if engine is None:
+            if deepseek_configured:
+                order = ["deepseek"]
+            else:
+                order = free_order
+                allow_free = True
+        elif engine == "deepseek":
+            if deepseek_configured:
+                order = ["deepseek"]
             else:
                 reason = self.deepseek_unavailable_reason or "不可用"
-                deepseek_fallback_reason = f"DeepSeek 搜索不可用：{reason}"
+                deepseek_fallback_reason = f"DeepSeek 搜索不可用：{reason}，改用免费搜索"
                 degraded = True
                 stages.append({"stage": "deepseek", "kind": "unavailable", "reason": reason})
-        elif engine and engine not in order and engine not in self._degraded_engines:
-            order.insert(0, engine)
+                order = free_order
+                allow_free = True
+        else:
+            # 显式指定免费引擎：允许免费链路（含浏览器/DDG）。
+            order = [engine, *[name for name in free_order if name != engine]]
+            allow_free = True
 
         for name in order:
             done = await _try(name, lambda n=name: self.search(query, num_results, engine=n))
@@ -353,8 +366,8 @@ class SearchManager:
             if name == "deepseek":
                 deepseek_fallback_reason = errors[-1] if errors else "DeepSeek 搜索失败"
 
-        # ② 浏览器脚本化通道：内容类失败的真正补救手段（换身份而非换站点）。
-        if self._browser_fallback:
+        # ② 浏览器脚本化通道：只在允许免费链路时使用。
+        if allow_free and self._browser_fallback:
             channel = self._browser_channel
             if channel is None:
                 from neobot_app.web_search.browser_channel import get_browser_channel
@@ -372,7 +385,9 @@ class SearchManager:
                 stages.append({"stage": "browser", "kind": "error", "reason": str(exc)[:120]})
 
         # ③ DuckDuckGo：最后兜底，带固定预算（部署实测很慢）。
-        for name in self._degraded_engines:
+        for name in (self._degraded_engines if allow_free else []):
+            if name in order:
+                continue
             done = await _try(name, lambda n=name: self.search(query, num_results, engine=n))
             if done is not None:
                 return done
@@ -407,4 +422,4 @@ class SearchManager:
 
     @property
     def primary_engine(self) -> str:
-        return self._engine_names[0]
+        return "deepseek" if self.deepseek_available else self._engine_names[0]

@@ -1040,7 +1040,11 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
     bili_runtime = None
     try:
         from neobot_app.audio.asr import build_asr_service
-        from neobot_app.bilibili.runtime import BilibiliRuntime, build_bilibili_skills
+        from neobot_app.bilibili.runtime import (
+            BilibiliRuntime,
+            BilibiliRuntimeConfigConsumer,
+            build_bilibili_skills,
+        )
 
         asr_service = build_asr_service(
             config, logger=logger_factory.get_logger("app.asr")
@@ -1109,6 +1113,8 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
         )
         if command_service is not None:
             bili_runtime.register_commands(command_service)
+        hot_reload_registry.unregister("bilibili")
+        hot_reload_registry.register(BilibiliRuntimeConfigConsumer(bili_runtime))
         for _skill in build_bilibili_skills(
             archive_service=memory_svcs["archive_memory_service"],
             uow_factory=uow_factory,

@@ -34,9 +34,8 @@ def _build_search_tool() -> ToolDefinition:
             "name": "search",
             "description": (
                 "执行联网搜索，返回带编号的搜索结果列表。"
-                "默认 engine=auto 使用免费的旧实现（Bing/DuckDuckGo），质量较低但免费；"
-                "对结果质量要求高时可显式 engine='deepseek'（DeepSeek 付费 API，按次计费）；"
-                "DeepSeek 额度不足会自动回退旧实现并告知。"
+                "默认 engine=auto 使用 DeepSeek 搜索；只有显式 engine=bing/duckduckgo、"
+                "缺少 DeepSeek_APIKey 或 deepseek_enabled=false 时才使用免费实现。"
                 "强烈建议使用 mode 参数进行多角度研究搜索，一次搜索会从多个变体查询并合并结果，"
                 "比多次普通关键词搜索高效得多。"
                 "可用 mode：encyclopedia（百科/百度百科/wiki）、community（知乎/贴吧/论坛/NGA）、"
@@ -70,9 +69,8 @@ def _build_search_tool() -> ToolDefinition:
                         "enum": ["auto", "bing", "duckduckgo", "deepseek"],
                         "default": "auto",
                         "description": (
-                            "搜索实现。默认 auto 使用免费的旧实现（Bing/DDG），质量较低但免费；"
-                            "高质量要求可显式 engine='deepseek'（DeepSeek 付费 API，按次计费）；"
-                            "DeepSeek 额度不足/Key 无效会自动回退旧实现并告知"
+                            "搜索实现。默认 auto 使用 DeepSeek；显式 bing/duckduckgo、"
+                            "缺少 DeepSeek_APIKey 或 deepseek_enabled=false 时使用免费实现"
                         ),
                     },
                 },
@@ -319,11 +317,11 @@ def build_web_search_package(
         id="web_search",
         name="联网搜索工具包",
         short_description=(
-            f"多引擎搜索（Bing/DuckDuckGo）+ 网页读取，最多{max_rounds}轮，"
+            f"DeepSeek 搜索（缺 Key/显式免费时回退 Bing/DDG）+ 网页读取，最多{max_rounds}轮，"
             f"支持百科/社区/新闻/官方/视频/学术多模式研究"
         ),
         description=(
-            f"联网搜索与网页读取。支持多搜索引擎（Bing、DuckDuckGo）、"
+            f"联网搜索与网页读取。默认 DeepSeek，缺 Key/显式指定时支持 Bing、DuckDuckGo；"
             f"多模式研究搜索（百科/社区/新闻/官方/视频/学术）、"
             f"最多 {max_rounds} 轮搜索、单次预览上限 {preview_pages_limit} 页。"
         ),

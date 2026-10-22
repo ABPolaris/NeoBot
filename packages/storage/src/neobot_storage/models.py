@@ -202,6 +202,10 @@ class EmojiData(Base):
     analysis_text: Mapped[str | None] = mapped_column(Text)
     use_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     image_source: Mapped[str | None] = mapped_column(String, nullable=True)
+    #: 候选曝光分（迁移 0029）：只影响排序，真实发送次数仍记在 use_count
+    exposure_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    #: 爱用标记（迁移 0029）
+    is_favorite: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

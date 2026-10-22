@@ -209,11 +209,13 @@ def build_emoji_service(
     logger_factory: Any,
 ) -> EmojiService:
     emoji_page_size = getattr(getattr(config, "chat", None), "emoji_page_size", 50) or 50
+    favorite_limit = int(getattr(getattr(config, "chat", None), "emoji_favorite_limit", 10) or 10)
     return EmojiService(
         data_dir=data_dir,
         uow_factory=uow_factory,
         vision_provider=vision_provider,
         page_size=emoji_page_size,
+        favorite_limit=favorite_limit,
         logger=logger_factory.get_logger("app.emoji"),
     )
 
