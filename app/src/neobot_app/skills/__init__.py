@@ -442,12 +442,18 @@ def build_all_skills(
             and getattr(tools_config, "enabled", True)):
         from pathlib import Path
         from neobot_app.agent_tools.runtime import AgentToolRuntime
+        from neobot_app.agent_tools.web import (
+            build_deepseek_web_tools,
+            build_free_web_tools,
+        )
         from neobot_app.skills.agent_tools_skill import AgentToolsSkill
         runtime = AgentToolRuntime(
             sandbox_service, state_dir=Path(kwargs.get("data_dir", ".")) / "agent_tools",
             credential_manager=credential_manager, provider=agent_provider,
             vision_provider=vision_provider, skill_manager=mgr, notification_hub=notification_hub,
             config=tools_config, web_search_config=web_search_config,
+            web_tools=build_deepseek_web_tools(config),
+            free_web_tools=build_free_web_tools(config),
         )
         owner = AgentToolsSkill(runtime)
         mgr.register(owner)
