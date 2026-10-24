@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Callable
 from typing import Any
 
 from neobot_app.bilibili._compat import call_client, get_field
@@ -80,6 +81,7 @@ class BilibiliReplyEngine:
         video_service: Any = None,
         bot_name: str = "",
         bot_uid: int = 0,
+        bot_uid_getter: Callable[[], int] | None = None,
         bot_data: str = "",
         other_name: str = "",
         max_comment_chars: int = 200,
@@ -94,6 +96,8 @@ class BilibiliReplyEngine:
         self._video_service = video_service
         self._bot_name = bot_name
         self._bot_uid = int(bot_uid or 0)
+        #: 未显式给 bot_uid 时，从登录账号懒读自己的 B站 UID（登录可能发生在构造之后）。
+        self._bot_uid_getter = bot_uid_getter
         self._bot_data = bot_data
         self._other_name = other_name
         self._max_comment_chars = max(0, int(max_comment_chars))
@@ -106,12 +110,24 @@ class BilibiliReplyEngine:
     def available(self) -> bool:
         return self._provider is not None
 
+    def _effective_bot_uid(self) -> int:
+        """自己的 B站 UID：显式配置优先，否则每次从登录态读取（不缓存旧账号）。"""
+        if self._bot_uid:
+            return self._bot_uid
+        getter = self._bot_uid_getter
+        if getter is None:
+            return 0
+        try:
+            return int(getter() or 0)
+        except Exception:
+            return 0
+
     # ── 对外生成入口 ──
 
     async def generate_comment_reply(self, ctx: CommentContext) -> str | None:
         """生成评论回复；返回 None 表示不回复（跳过/生成失败）。"""
         ctx.bot_name = ctx.bot_name or self._bot_name
-        ctx.bot_uid = ctx.bot_uid or self._bot_uid
+        ctx.bot_uid = ctx.bot_uid or self._effective_bot_uid()
         ctx.bot_data = ctx.bot_data or self._bot_data
         ctx.other_name = ctx.other_name or self._other_name
         await self._enrich_comment(ctx)
@@ -129,7 +145,7 @@ class BilibiliReplyEngine:
     async def generate_private_reply(self, ctx: PrivateMessageContext) -> str | None:
         """生成私信回复；返回 None 表示不回复。"""
         ctx.bot_name = ctx.bot_name or self._bot_name
-        ctx.bot_uid = ctx.bot_uid or self._bot_uid
+        ctx.bot_uid = ctx.bot_uid or self._effective_bot_uid()
         ctx.bot_data = ctx.bot_data or self._bot_data
         ctx.other_name = ctx.other_name or self._other_name
         await self._enrich_private(ctx)
@@ -153,7 +169,7 @@ class BilibiliReplyEngine:
             history=history,
             live=live,
             bot_name=self._bot_name,
-            bot_uid=self._bot_uid,
+            bot_uid=self._effective_bot_uid(),
             bot_data=self._bot_data,
             other_name=self._other_name,
         )

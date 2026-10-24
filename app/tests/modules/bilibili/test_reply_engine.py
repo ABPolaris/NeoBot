@@ -415,3 +415,26 @@ async def test_no_video_link_does_not_call_watch() -> None:
 
     assert video.calls == []
     assert "<相关视频>" not in provider.calls[0][1]["content"]
+
+async def test_bot_uid_auto_reads_from_getter() -> None:
+    """没有显式 bot_uid 时，从登录账号懒读自己的 B站 UID（登录可能晚于构造）。"""
+    provider = FakeProvider("好")
+    engine = BilibiliReplyEngine(provider, bot_name="Neo", bot_uid_getter=lambda: 4321)
+    ctx = _comment_ctx()
+
+    await engine.generate_comment_reply(ctx)
+
+    assert ctx.bot_uid == 4321
+    assert "4321" in json.dumps(provider.calls[0], ensure_ascii=False)
+
+
+async def test_bot_uid_getter_failure_falls_back_to_zero() -> None:
+    def boom() -> int:
+        raise RuntimeError("未登录")
+
+    engine = BilibiliReplyEngine(FakeProvider("好"), bot_name="Neo", bot_uid_getter=boom)
+    ctx = _comment_ctx()
+
+    await engine.generate_comment_reply(ctx)
+
+    assert ctx.bot_uid == 0

@@ -98,7 +98,7 @@ class BilibiliRuntime:
             uow_factory=uow_factory,
             video_service=self.video_service,
             bot_name=bot_name,
-            bot_uid=0,
+            bot_uid_getter=self._bili_uid,
             bot_data=bot_data,
             flow_registry=flow_registry,
         )
@@ -142,7 +142,7 @@ class BilibiliRuntime:
             willing_service=willing_service,
             flow_registry=flow_registry,
             mention_names=list(getattr(cfg, "live_interaction_mention_names", None) or []),
-            reply_chance=float(getattr(cfg, "live_interaction_reply_chance", 0.15) or 0.15),
+            reply_chance=float(getattr(cfg, "live_interaction_reply_chance", 0.3) or 0.3),
             asr_default_enabled=bool(getattr(cfg, "live_interaction_asr_enabled", False)),
             prompt_store=prompt_store,
             auto_look_enabled=bool(getattr(cfg, "live_interaction_auto_look_enabled", False)),
@@ -170,7 +170,7 @@ class BilibiliRuntime:
             0.0,
             min(
                 1.0,
-                float(getattr(cfg, "live_interaction_reply_chance", 0.15) or 0.15),
+                float(getattr(cfg, "live_interaction_reply_chance", 0.3) or 0.3),
             ),
         )
         live._cooldown = max(
@@ -333,6 +333,13 @@ class BilibiliRuntime:
                 )
 
     # ── 对外门面 ──
+
+    def _bili_uid(self) -> int:
+        """登录账号的 B站 UID（自动读取，未登录为 0）。"""
+        try:
+            return int(self.service.status().get("uid") or 0)
+        except Exception:
+            return 0
 
     def status_text(self) -> str:
         try:

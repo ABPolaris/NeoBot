@@ -144,3 +144,18 @@ def test_apply_config_updates_live_mention_names(tmp_path) -> None:
 
     assert runtime.live_interactor._mention_names == ("前女友",)
     assert "前女友" in runtime.live_interactor._known_bot_names()
+
+def test_bili_uid_reads_from_login_status(tmp_path) -> None:
+    runtime = _runtime(tmp_path)
+    assert runtime._bili_uid() == 0
+
+    runtime.service.status = lambda: {"uid": 4242}  # type: ignore[method-assign]
+    assert runtime._bili_uid() == 4242
+    # 回复引擎没有显式 bot_uid 时走同一个 getter，提示词能拿到自己的 B站 UID
+    assert runtime.engine._effective_bot_uid() == 4242
+
+
+def test_live_interaction_reply_chance_default_is_0_3() -> None:
+    from neobot_app.config.schemas.bot import BotConfig
+
+    assert BotConfig().bilibili.live_interaction_reply_chance == 0.3

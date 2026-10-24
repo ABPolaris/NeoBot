@@ -1830,11 +1830,11 @@ class Bilibili:
         },
     )
     live_interaction_reply_chance: float = field(
-        default=0.15,
+        default=0.3,
         metadata={
             "description": (
                 "直播间普通弹幕的基础回复概率（0-1）；被@/叫名字仍按 at_mention_guaranteed_reply 必回。"
-                "默认 0.15，最终概率还会乘群聊/会话/用户意愿系数。"
+                "默认 0.3，最终概率还会乘群聊/会话/用户意愿系数。"
             )
         },
     )
