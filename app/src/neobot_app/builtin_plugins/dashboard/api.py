@@ -463,6 +463,14 @@ class DashboardApi:
         blocked = self._require_bilibili_login(request)
         if blocked is not None:
             return blocked
+        service = self._service("bilibili_service")
+        refresh = getattr(service, "refresh", None)
+        if callable(refresh):
+            try:
+                await refresh()
+            except Exception as exc:
+                # 自愈失败不挡读状态：snapshot 里仍有上次结论与 error 文案。
+                self.logger.warning(f"B站登录态自愈刷新失败: {exc}")
         return _json_ok(self.console.bilibili_login.snapshot())
 
     async def bilibili_login_start(self, request: web.Request) -> web.Response:

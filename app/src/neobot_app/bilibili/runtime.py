@@ -42,6 +42,10 @@ async def _maybe_await(value: Any) -> None:
 
 #: summary 完成后等待 30 分钟再生成日记；summary 未结束则 diary 一直等。
 DIARY_SUMMARY_SETTLE_SECONDS = 1800.0
+#: 日记未启用/时间配置非法时，隔多久再看一次配置（热重载可以随时改）。
+DIARY_IDLE_SECONDS = 60.0
+#: 直播监听启动失败后的退避重试间隔（秒）；用尽后等下次登录/命令再触发。
+_LIVE_RETRY_DELAYS = (5.0, 15.0, 60.0, 300.0)
 
 
 class BilibiliRuntime:
@@ -106,7 +110,7 @@ class BilibiliRuntime:
             self.service, self.engine, cfg, data_dir=DATA_DIR
         )
         self.private_monitor = BilibiliPrivateMonitor.from_config(
-            self.service, self.engine, cfg
+            self.service, self.engine, cfg, data_dir=DATA_DIR
         )
         self.diary = BilibiliDiaryService.from_config(
             provider,
@@ -155,6 +159,9 @@ class BilibiliRuntime:
             self.service, self.engine, live_interactor=self.live_interactor
         )
         self._diary_task: asyncio.Task[None] | None = None
+        #: 时间配置非法只提醒一次，避免空闲重排期每分钟刷屏。
+        self._diary_time_warned = False
+        self._live_retry_task: asyncio.Task[None] | None = None
         #: 当前扫码登录任务与代次：新 /login 取消旧任务，旧任务不再回复消息。
         self._login_task: asyncio.Task[None] | None = None
         self._login_attempt = 0
@@ -210,11 +217,10 @@ class BilibiliRuntime:
                 task.cancel()
                 live._auto_look_task = None
             if live._auto_look_enabled and getattr(live, "_running", False):
-                import asyncio
-
                 live._auto_look_task = asyncio.create_task(
                     live._auto_look_loop(), name="bilibili-live-auto-look"
                 )
+        self._sync_diary_task()
         self._logger.info("B站运行期配置已热更新")
 
     # ── 生命周期 ──
@@ -235,10 +241,20 @@ class BilibiliRuntime:
         try:
             await self.live_interactor.start()
         except Exception:
-            self._logger.exception("B站直播交互器启动失败（已跳过）")
+            # start() 一开始就置 _running=True；不复位的话 ensure_started 永远直接返回。
+            self._logger.exception("B站直播交互器启动失败（已复位，稍后按退避重试）")
+            self._reset_live_running()
+            self._schedule_live_retry()
+        self._sync_diary_task()
 
     async def stop(self) -> None:
         self._started = False
+        retry_task = self._live_retry_task
+        self._live_retry_task = None
+        if retry_task is not None:
+            retry_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await retry_task
         login_task = self._login_task
         self._login_task = None
         if login_task is not None:
@@ -268,8 +284,6 @@ class BilibiliRuntime:
     async def run(self) -> None:
         """后台常驻协程：随应用启动，被取消时停止全部子服务。"""
         await self.start()
-        if getattr(getattr(self._config, "bilibili", None), "dynamic_diary_enabled", False):
-            self._diary_task = asyncio.create_task(self._diary_loop())
         try:
             await asyncio.Event().wait()
         finally:
@@ -293,19 +307,43 @@ class BilibiliRuntime:
         except (TypeError, ValueError):
             hour = minute = -1
         if not (0 <= hour < 24 and 0 <= minute < 60):
-            self._logger.warning(f"B站动态日记时间配置非法: {raw!r}（应为 HH:MM）")
+            if not self._diary_time_warned:
+                self._logger.warning(f"B站动态日记时间配置非法: {raw!r}（应为 HH:MM）")
+                self._diary_time_warned = True
             return None
+        self._diary_time_warned = False
         current = now or datetime.now().astimezone()
         target = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= current:
             target += timedelta(days=1)  # 今天的时间点已过，排到明天
         return (target - current).total_seconds()
 
+    def _sync_diary_task(self) -> None:
+        """按 dynamic_diary_enabled 热重载创建/取消日记任务；不重建连接。"""
+        enabled = bool(
+            getattr(
+                getattr(self._config, "bilibili", None), "dynamic_diary_enabled", False
+            )
+        )
+        task = self._diary_task
+        running = task is not None and not task.done()
+        if not enabled:
+            if running:
+                task.cancel()
+            self._diary_task = None
+            return
+        if not running and self._started:
+            self._diary_task = asyncio.create_task(
+                self._diary_loop(), name="bilibili-diary"
+            )
+
     async def _diary_loop(self) -> None:
         while True:
             delay = self._seconds_until_diary()
             if delay is None:
-                return
+                # 未启用/时间配置非法：等热重载改配置再排期，不能永久退出。
+                await asyncio.sleep(DIARY_IDLE_SECONDS)
+                continue
             summary = self._archive_summary_service
             if summary is not None:
                 # 原定时间前 5 分钟启动 summary；不设超时，结束后再等 30 分钟。
@@ -334,22 +372,6 @@ class BilibiliRuntime:
 
     # ── 对外门面 ──
 
-    def status_text(self) -> str:
-        try:
-            st = self.service.status()
-        except Exception as exc:
-            self._logger.warning("B站状态读取失败", error=str(exc))
-            return "B站状态读取失败，请稍后重试"
-        if not st.get("available"):
-            return "B站未登录（功能等同关闭）。发送 /login bilibili 扫码登录。"
-        state = "有效" if st.get("valid") else "登录态待校验"
-        return (
-            f"B站已登录：{st.get('uname') or '(未命名)'} (UID {st.get('uid') or 0})\n"
-            f"登录态：{state}；登录时间：{st.get('login_at') or '未知'}\n"
-            f"评论回复：{'开' if getattr(getattr(self._config, 'bilibili', None), 'comment_reply_enabled', False) else '关'}；"
-            f"私信回复：{'开' if getattr(getattr(self._config, 'bilibili', None), 'private_message_enabled', False) else '关'}"
-        )
-
     async def login_with_qr(self, *, on_qr: Any = None, on_status: Any = None) -> bool:
         ok = await self.service.login_with_qr(on_qr=on_qr, on_status=on_status)
         if ok and self._started:
@@ -362,6 +384,34 @@ class BilibiliRuntime:
             await self.live_interactor.ensure_started()
         except Exception:
             self._logger.exception("B站直播交互器自动启动失败")
+            self._reset_live_running()
+            self._schedule_live_retry()
+
+    def _reset_live_running(self) -> None:
+        """清掉 start() 半途失败留下的 _running，否则 ensure_started 永远直接返回。"""
+        self.live_interactor._running = False
+
+    def _schedule_live_retry(self) -> None:
+        task = self._live_retry_task
+        if task is not None and not task.done():
+            return
+        self._live_retry_task = asyncio.create_task(
+            self._retry_live_listener(), name="bilibili-live-retry"
+        )
+
+    async def _retry_live_listener(self) -> None:
+        for delay in _LIVE_RETRY_DELAYS:
+            await asyncio.sleep(delay)
+            if not self._started:
+                return
+            try:
+                await self.live_interactor.ensure_started()
+            except Exception:
+                self._reset_live_running()
+                self._logger.warning("B站直播交互器重试启动失败")
+                continue
+            self._logger.info("B站直播交互器重试启动成功")
+            return
 
     async def publish_dynamic(self, text: str, images: Any = None) -> int:
         return await self.service.publish_dynamic(text, images)
@@ -369,34 +419,27 @@ class BilibiliRuntime:
     # ── 命令注册 ──
 
     def register_commands(self, command_service: Any) -> None:
-        from neobot_app.commands.model import PERM_SUB_ADMIN, Command
+        from neobot_app.commands.model import PERM_EVERYONE, Command
 
         registry = command_service.registry
         self._register_login_command(registry, command_service)
-        self._register_live_commands(registry, command_service)
-        if not _has_command(registry, "B站账号"):
-            try:
-                from neobot_app.bilibili.account_card import register_account_command
-
-                register_account_command(registry, self)
-            except Exception:
-                self._logger.exception("B站账号命令注册失败（已跳过）")
+        self._register_live_commands(registry)
         if not _has_command(registry, "bili"):
             registry.register(
                 Command(
                     name="bili",
-                    description="B站状态/发动态（登录用 /login bilibili）",
+                    description="B站账号状态卡片/发动态（登录用 /login bilibili）",
                     usage="[status|dynamic <文本>]",
-                    permission=PERM_SUB_ADMIN,
+                    permission=PERM_EVERYONE,
                     handler=self._handle_bili,
                     params=(
-                        ("status", "查看B站登录与轮询状态"),
+                        ("status", "查看B站账号状态卡片"),
                         ("dynamic <文本>", "发布一条B站纯文本动态"),
                     ),
                 )
             )
 
-    def _register_live_commands(self, registry: Any, command_service: Any) -> None:
+    def _register_live_commands(self, registry: Any) -> None:
         """直播间交互命令；与 streaming_parser 监听插件完全独立。"""
         from neobot_app.commands.model import PERM_EVERYONE, PERM_SUB_ADMIN, Command
 
@@ -428,6 +471,10 @@ class BilibiliRuntime:
             if action is None:
                 return "第二个参数只能是 开 或 关"
             if action:
+                # 未登录时 enable 会出一张"监听开"的假成功卡片：先确认登录态。
+                await self.service.refresh()
+                if not self.service.available:
+                    return "B站未登录，先发送 /login bilibili 扫码登录。"
                 await self.live_interactor.ensure_started()
                 result = await self.live_interactor.enable(room_id, auto_reply=True)
                 if not result.get("ok"):
@@ -663,8 +710,39 @@ class BilibiliRuntime:
         args = list(ctx.args or [])
         sub = str(args[0]).lower() if args else "status"
         if sub in ("status", "状态", ""):
-            return self.status_text()
+            from neobot_app.bilibili.account_card import send_account_card
+
+            await self.service.refresh()
+            bilibili_cfg = getattr(self._config, "bilibili", None)
+            return await send_account_card(
+                ctx,
+                self.service,
+                extra_rows=[
+                    (
+                        "评论回复",
+                        "开"
+                        if getattr(bilibili_cfg, "comment_reply_enabled", False)
+                        else "关",
+                    ),
+                    (
+                        "私信回复",
+                        "开"
+                        if getattr(bilibili_cfg, "private_message_enabled", False)
+                        else "关",
+                    ),
+                ],
+            )
         if sub in ("dynamic", "动态"):
+            # 状态卡片对所有人开放；发动态仍是写操作，保持次级管理员门槛。
+            from neobot_app.commands.model import PERM_SUB_ADMIN
+
+            permissions = getattr(getattr(ctx, "service", None), "permissions", None)
+            allowed = (
+                permissions is not None
+                and permissions.can(ctx.user_id, PERM_SUB_ADMIN)
+            )
+            if not allowed:
+                return "发B站动态需要次级管理员权限。"
             text = " ".join(str(a) for a in args[1:]).strip()
             if not text:
                 return "用法：/bili dynamic <文本>"
