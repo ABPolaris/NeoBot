@@ -5,7 +5,11 @@ from __future__ import annotations
 from aiohttp import web
 
 from ..bilibili_login import LOGIN_PAGE, LOGIN_SCRIPT
-from neobot_app.panel_auth import PasswordPolicyError
+from neobot_app.panel_auth import (
+    PasswordPolicyError,
+    PasswordRevisionError,
+    PasswordVerificationError,
+)
 from ..security import is_loopback
 from ._common import _json_ok, _json_error
 
@@ -135,6 +139,52 @@ class AuthMixin:
             self.console.sessions.revoke(session.token)
         response = _json_ok({"message": "已退出登录"})
         self.console.clear_session_cookie(response)
+        return response
+
+    async def auth_password(self, request: web.Request) -> web.Response:
+        """已登录管理员改密；成功后不签发替代会话。"""
+        denied = self._require_manage(request, action="修改面板密码")
+        if denied is not None:
+            return denied
+        session = request.get("dashboard_session")
+        if session is None:
+            return _json_error("需要登录", status=401)
+        ip = self.console.request_ip(request)
+        locked, remaining = self.console.limiter.is_locked(ip)
+        if locked:
+            return _json_error(f"密码校验失败次数过多，请在 {remaining} 秒后重试", status=429)
+        try:
+            payload = await self._read_json(request)
+        except ValueError:
+            return _json_error("请求体必须是有效 JSON 对象")
+        current = payload.get("current_password")
+        new = payload.get("new_password")
+        confirm = payload.get("confirm")
+        if not all(isinstance(value, str) for value in (current, new, confirm)):
+            return _json_error("当前密码、新密码和确认密码均须为字符串")
+        if new != confirm:
+            return _json_error("两次输入的新密码不一致")
+        try:
+            self.console.passwords.change_password(current, new, expected_revision=session.password_revision)
+        except PasswordPolicyError as exc:
+            return _json_error(str(exc))
+        except PasswordVerificationError:
+            self.console.limiter.record_failure(ip)
+            self.logger.warning(f"面板改密校验失败 ip={ip}")
+            return _json_error("当前密码不正确", status=403)
+        except PasswordRevisionError:
+            self.console.sessions.revoke(session.token)
+            response = _json_error("登录已失效，请重新登录", status=401)
+            self.console.clear_session_cookie(response)
+            return response
+        except OSError:
+            self.logger.error(f"面板密码写入失败 ip={ip}")
+            return _json_error("密码保存失败，请稍后重试", status=500)
+        self.console.sessions.revoke_all()
+        self.console.limiter.reset(ip)
+        response = _json_ok({"reauthenticate": True, "message": "密码已修改，请重新登录"})
+        self.console.clear_session_cookie(response)
+        self.logger.warning(f"面板密码已修改，全部会话已撤销 ip={ip}")
         return response
 
     # ------------------------------------------------------------------

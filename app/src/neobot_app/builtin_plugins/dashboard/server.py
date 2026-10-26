@@ -331,11 +331,14 @@ class DashboardServer:
         )
         app.on_response_prepare.append(self._security_headers)
 
+        self._route(app, "GET", "/robots.txt", self._robots)
+        self._route(app, "HEAD", "/robots.txt", self._robots)
         self._route(app, "GET", "/healthz", self._healthz)
         self._route(app, "GET", "/api/auth/status", self.api.auth_status)
         self._route(app, "POST", "/api/auth/setup", self.api.auth_setup)
         self._route(app, "POST", "/api/auth/login", self.api.auth_login)
         self._route(app, "POST", "/api/auth/logout", self.api.auth_logout)
+        self._route(app, "POST", "/api/auth/password", self.api.auth_password)
         self._route(app, "GET", "/api/auth/me", self.api.auth_me)
 
         self._route(app, "GET", "/api/overview", self.api.overview)
@@ -468,6 +471,12 @@ class DashboardServer:
 
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler: Any) -> web.StreamResponse:
+        # robots 规则须公开读取；根路径与前缀别名均不依赖会话或扩展鉴权声明。
+        if request.method in {"GET", "HEAD"} and request.path in {
+            "/robots.txt",
+            f"{self.base_path}/robots.txt",
+        }:
+            return await handler(request)
         path = self._strip_base(request.path)
         ip = self.request_ip(request)
         loopback = is_loopback(ip)
@@ -545,6 +554,7 @@ class DashboardServer:
         return await handler(request)
 
     async def _security_headers(self, request: web.Request, response: web.StreamResponse) -> None:
+        response.headers["X-Robots-Tag"] = "noindex, nofollow, nosnippet, noimageindex"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Frame-Options"] = "DENY"
@@ -565,6 +575,14 @@ class DashboardServer:
     # ------------------------------------------------------------------
     # 静态资源
     # ------------------------------------------------------------------
+
+    async def _robots(self, request: web.Request) -> web.StreamResponse:
+        return web.Response(
+            text="User-agent: *\nDisallow: /\n",
+            content_type="text/plain",
+            charset="utf-8",
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def _index(self, request: web.Request) -> web.StreamResponse:
         if not _INDEX_FILE.is_file():

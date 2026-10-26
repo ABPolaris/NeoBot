@@ -149,7 +149,7 @@ class SystemMixin:
         return _json_ok(
             {
                 "items": [self._plugin_payload(item) for item in snapshots],
-                "manage_enabled": self.console.manage_plugins,
+                "manage_enabled": self._can_manage(request),
                 "hot_reload": True,
                 "installer": bool(getattr(control, "installer_available", False)),
                 "console_plugin": self.console.plugin_name,

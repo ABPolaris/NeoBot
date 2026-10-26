@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -145,12 +146,20 @@ class PluginsMixin:
         )
 
     async def plugin_toggle(self, request: web.Request) -> web.Response:
+        """兼容无请求体的反转，也支持明确目标与旧状态校验。"""
         denied = self._require_manage(request)
         if denied is not None:
             return denied
         control = self._plugin_control()
         if control is None:
             return _json_error("插件运行时不可用", status=503)
+        try:
+            payload = await self._read_json(request)
+        except ValueError as exc:
+            return _json_error(str(exc), status=400)
+        for field in ("enabled", "expected_enabled"):
+            if field in payload and not isinstance(payload[field], bool):
+                return _json_error(f"{field} 必须是布尔值", status=400)
         name = request.match_info["name"]
         snapshot = self._find_snapshot(control, name)
         if snapshot is None:
@@ -161,9 +170,22 @@ class PluginsMixin:
                 "请把 data/plugin_state.json 里 dashboard 的 enabled 改为 false 后重启 NeoBot",
                 status=400,
             )
-        target_enabled = not bool(snapshot.enabled)
-        result = await control.set_enabled(name, target_enabled)
-        return _operation_response(result, f"{'已启用' if target_enabled else '已停用'} {name}")
+        lock = self._plugin_toggle_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            snapshot = self._find_snapshot(control, name)
+            if snapshot is None:
+                return _json_error(f"插件不存在: {name}", status=404)
+            current_enabled = bool(snapshot.enabled)
+            if "expected_enabled" in payload and payload["expected_enabled"] != current_enabled:
+                return _json_error(
+                    "插件启停状态已被其他操作修改，请刷新后重试",
+                    status=409,
+                    name=name,
+                    enabled=current_enabled,
+                )
+            target_enabled = payload.get("enabled", not current_enabled)
+            result = await control.set_enabled(name, target_enabled)
+            return _operation_response(result, f"{'已启用' if target_enabled else '已停用'} {name}")
 
     async def plugin_reload(self, request: web.Request) -> web.Response:
         denied = self._require_manage(request)
