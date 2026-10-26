@@ -2842,7 +2842,14 @@ class ReplyOrchestrator:
                                       human_request=event.human_request, allowed_tools=allowed)
                 self._agent_tool_turns[event.event_id] = (shared_tools.runtime, context, messages)
 
-        tools = reply_toolset.definitions()
+        cross_chat_loaded = self._preactivate_cross_chat_tools(
+            reply_toolset, queue, queue_key, event
+        )
+        tools = (
+            reply_toolset.executor.definitions()
+            if cross_chat_loaded
+            else reply_toolset.definitions()
+        )
         vision_context = ReplyVisionContext()
         from neobot_app.skills.image_context_skill import ImageContextSkill
 
@@ -3005,6 +3012,11 @@ class ReplyOrchestrator:
                         queue_key=queue_key,
                         notification=notification_text[:200],
                     )
+
+                # 目标聊天流收到过跨聊天投递：自动把 cross_chat 工具加进本轮工具表，
+                # 让 agent 能直接查来源聊天流，而不必先 skills__load_tools。
+                if self._preactivate_cross_chat_tools(reply_toolset, queue, queue_key, event):
+                    tools = reply_toolset.executor.definitions()
 
                 # 沉默提醒:读完后台通知之后、发起模型调用之前判定。
                 # 模型长时间只调用工具、对用户一条消息都不发时注入一条 user 提醒;
@@ -4024,6 +4036,47 @@ class ReplyOrchestrator:
             kept.append(entry)
         return kept
 
+    def _preactivate_cross_chat_tools(
+        self, toolset: Any, queue: Any, queue_key: str, event: Any = None,
+    ) -> bool:
+        """本聊天流收到跨聊天投递时自动加载 cross_chat 工具。
+
+        目标 agent 需要 cross_chat_query/status 查看来源聊天流与任务状态；这些工具
+        默认按需加载，等模型自己 skills__load_tools 往往已经错过上下文。
+        """
+        executor = getattr(toolset, "executor", None)
+        if executor is None:
+            return False
+        activated = getattr(executor, "activated_skill_names", None)
+        if callable(activated) and "cross_chat" in activated():
+            return False
+        hit = False
+        background = str(getattr(event, "background_content", "") or "")
+        if background.startswith("[跨聊天"):
+            hit = True
+        if not hit:
+            from neobot_app.message.queue import QueueEntryType
+
+            for entry in queue.entries(queue_key):
+                if (
+                    entry.kind == QueueEntryType.NOTIFICATION
+                    and entry.notification is not None
+                    and entry.notification.source == "cross_chat"
+                ):
+                    hit = True
+                    break
+        if not hit:
+            return False
+        preactivate = getattr(executor, "preactivate_skills", None)
+        if not callable(preactivate):
+            return False
+        # archive_crud 一起加载：目标 agent 要能按提示读源聊天流的完整档案。
+        names = preactivate(["cross_chat", "archive_crud"])
+        if names:
+            self._logger.info(
+                f"检测到跨聊天投递，已自动加载工具：{names}", queue_key=queue_key
+            )
+        return bool(names)
     async def _poll_background_notifications(self, pipeline_key: str) -> str | None:
         """轮询所有后台通知源，返回通知文本或 None。"""
         try:

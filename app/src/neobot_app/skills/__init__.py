@@ -333,6 +333,7 @@ def build_all_skills(
                 group_message_queue=group_message_queue,
                 friend_message_queue=friend_message_queue,
                 notification_hub=notification_hub,
+                archive_memory_service=archive_memory_service,
             )
         )
 

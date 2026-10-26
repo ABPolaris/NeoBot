@@ -3300,3 +3300,61 @@ async def test_agent_loop_injects_new_member_profiles_for_mid_pipeline_message(
     contents = [str(m.get("content") or "") for m in provider.calls[1]]
     assert any("[新出现的群友档案]" in content for content in contents)
     assert any("QQ号:20002" in content for content in contents)
+
+# ── 跨聊天工具自动加载 ──
+
+
+class _CrossChatExecutor:
+    def __init__(self) -> None:
+        self.loaded: list[str] = []
+        self.preactivated: list[list[str]] = []
+
+    def activated_skill_names(self) -> list[str]:
+        return list(self.loaded)
+
+    def preactivate_skills(self, names) -> list[str]:
+        self.preactivated.append(list(names))
+        self.loaded = list(names)
+        return list(names)
+
+
+async def test_cross_chat_tools_autoload_for_chat_stream_with_cross_chat_notification():
+    """收到过跨聊天投递的聊天流：不必手动 skills__load_tools，工具自动进工具表。"""
+    from neobot_app.message.queue import NotificationEntry
+
+    orch = _make_orchestrator()
+    executor = _CrossChatExecutor()
+    toolset = SimpleNamespace(executor=executor)
+    queue = MessageQueue()
+    queue.push_notification("888888", NotificationEntry(source="cross_chat", content="[跨聊天任务] hi"))
+
+    hit = orch._preactivate_cross_chat_tools(toolset, queue, "888888")
+
+    assert hit is True
+    assert executor.preactivated == [["cross_chat", "archive_crud"]]
+
+
+async def test_cross_chat_tools_autoload_for_background_content_trigger():
+    """直接 start_background_reply 投递（无队列通知）也要识别跨聊天触发内容。"""
+    orch = _make_orchestrator()
+    executor = _CrossChatExecutor()
+    toolset = SimpleNamespace(executor=executor)
+    queue = MessageQueue()
+    event = SimpleNamespace(background_content="[跨聊天任务] 这是来自「QQ群 111」的消息")
+
+    hit = orch._preactivate_cross_chat_tools(toolset, queue, "888888", event)
+
+    assert hit is True
+    assert executor.preactivated == [["cross_chat", "archive_crud"]]
+
+
+async def test_cross_chat_tools_not_autoloaded_without_cross_chat_input():
+    orch = _make_orchestrator()
+    executor = _CrossChatExecutor()
+    toolset = SimpleNamespace(executor=executor)
+    queue = MessageQueue()
+
+    hit = orch._preactivate_cross_chat_tools(toolset, queue, "888888")
+
+    assert hit is False
+    assert executor.preactivated == []
