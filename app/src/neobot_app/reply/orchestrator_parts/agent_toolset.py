@@ -180,7 +180,14 @@ class AgentToolsetMixin:
                                       human_request=event.human_request, allowed_tools=allowed)
                 self._agent_tool_turns[event.event_id] = (shared_tools.runtime, context, messages)
 
-        tools = reply_toolset.definitions()
+        cross_chat_loaded = self._preactivate_cross_chat_tools(
+            reply_toolset, queue, queue_key, event
+        )
+        tools = (
+            reply_toolset.executor.definitions()
+            if cross_chat_loaded
+            else reply_toolset.definitions()
+        )
         vision_context = ReplyVisionContext()
         from neobot_app.skills.image_context_skill import ImageContextSkill
 

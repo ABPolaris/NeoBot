@@ -100,6 +100,19 @@ class FakeHub:
         return True
 
 
+
+class FakeArchive:
+    """按 (table, key) 返回档案；记录读取顺序。"""
+
+    def __init__(self, values: dict[tuple[str, str], str] | None = None) -> None:
+        self.values = values or {}
+        self.calls: list[tuple[str, str]] = []
+
+    async def get(self, table: str, key: str) -> Any:
+        self.calls.append((table, key))
+        value = self.values.get((table, key))
+        return SimpleNamespace(value=value) if value else None
+
 def _parse(text: str) -> dict:
     return json.loads(text)
 
@@ -131,12 +144,35 @@ async def test_send_delivers_to_target_agent_and_never_posts_to_chat():
     assert result["ok"] is True
     assert result["status"] == "delivered"
     assert result["target"] == "group:888"
-    assert orchestrator.calls == [{
-        "kind": "group", "conversation_id": "888", "content": "告知群里明天十点集合",
-        "manager_name": "cross_chat", "reasons": ["跨聊天任务"],
-    }]
+    call = orchestrator.calls[0]
+    assert call["kind"] == "group" and call["conversation_id"] == "888"
+    content = call["content"]
+    # 目标 agent 必须知道来源、不可见性与查看工具，正文仍在最后
+    assert content.startswith("[跨聊天任务]")
+    assert "这是来自「QQ群 111」的消息" in content
+    assert "当前聊天流的其他用户看不到这条消息" in content
+    assert 'cross_chat_query(target_kind="group", target_id="111")' in content
+    assert content.rstrip().endswith("告知群里明天十点集合")
     # 这条断言就是旧 bug 的护栏
     assert adapter.group_sends == [] and adapter.private_sends == []
+
+async def test_send_annotates_source_chat_profile_from_archive():
+    """源聊天流档案要一起带过去：目标 agent 才能理解任务背景。"""
+    archive = FakeArchive({("group_profile", "111"): "本群在筹备发布会，负责物料"})
+    orchestrator = FakeOrchestrator(FakeEvent())
+    skill = CrossChatSkill(orchestrator=orchestrator, archive_memory_service=archive)
+
+    await skill.execute("cross_chat_send", {
+        "target_kind": "group", "target_id": "888", "task": "同步物料进度",
+        "pipeline_key": "group:111",
+    })
+
+    content = orchestrator.calls[0]["content"]
+    assert "这是来自「QQ群 111」的消息" in content
+    assert "源聊天流档案：本群在筹备发布会，负责物料" in content
+    assert 'archive_crud__read_archive(table_name="group_profile", key="111")' in content
+    # 先读 group_summary，读不到再退 group_profile
+    assert archive.calls == [("group_summary", "111"), ("group_profile", "111")]
 
 
 async def test_send_to_private_passes_through_kind():
@@ -189,7 +225,10 @@ async def test_busy_target_falls_back_to_hub_injection_without_reply_attribution
     assert result["ok"] is True
     assert result["status"] == "delegated"
     assert "无法归属" in result["detail"]
-    assert hub.published[0]["content"] == "hi"
+    content = hub.published[0]["content"]
+    assert content.startswith("[跨聊天任务]")
+    assert "未知来源聊天流" in content or "这是来自" in content
+    assert content.rstrip().endswith("hi")
     assert hub.published[0]["conversation_id"] == "888"
 
 
@@ -235,7 +274,9 @@ async def test_markers_in_task_are_used_as_fallback_and_stripped():
     assert result["mode"] == "wait"
     assert result["notification_mode"] == "response"
     # 标记不能出现在交给目标 agent 的正文里
-    assert orchestrator.calls[0]["content"] == "告知群里交作业"
+    content = orchestrator.calls[0]["content"]
+    assert content.rstrip().endswith("告知群里交作业")
+    assert "[mode: wait]" not in content and "[notify: response]" not in content
 
 
 async def test_task_with_only_markers_rejected():
@@ -294,9 +335,10 @@ async def test_fire_and_forget_response_relays_reply_to_origin():
 
     await _drain_watchers(skill)
 
-    relay = [item for item in hub.published if "跨聊天回复" in item["content"]]
+    relay = [item for item in hub.published if "[跨聊天回复]" in item["content"]]
     assert len(relay) == 1
     assert relay[0]["kind"] == "group" and relay[0]["conversation_id"] == "111"
+    assert "这是来自「QQ群 888」的回复" in relay[0]["content"]
     assert "收到，明天见" in relay[0]["content"]
 
 

@@ -153,6 +153,7 @@ class CrossChatSkill(SkillModule):
         notification_hub: Any = None,
         orchestrator: Any = None,
         bilibili_channel: Any = None,
+        archive_memory_service: Any = None,
         wait_timeout_seconds: float = DEFAULT_WAIT_TIMEOUT_SECONDS,
     ) -> None:
         self._config = config
@@ -162,6 +163,7 @@ class CrossChatSkill(SkillModule):
         self._notification_hub = notification_hub
         self._orchestrator = orchestrator
         self._bilibili_channel = bilibili_channel
+        self._archive = archive_memory_service
         self._wait_timeout = float(wait_timeout_seconds)
         self._tasks: dict[str, _CrossChatTask] = {}
         self._watchers: set[asyncio.Task[None]] = set()
@@ -270,6 +272,74 @@ class CrossChatSkill(SkillModule):
         self._watchers.add(task)
         task.add_done_callback(self._watchers.discard)
 
+
+    # ── 跨聊天来源说明 ─────────────────────────────────────────────────
+
+    _SOURCE_PROFILE_MAX_CHARS = 400
+
+    async def _source_profile(
+        self, kind: str, conversation_id: str
+    ) -> tuple[str, str]:
+        """读源聊天流的档案摘要，返回 (表名, 摘要)；读不到给空串，不让投递失败。"""
+        archive = self._archive
+        if archive is None:
+            return "", ""
+        tables = (
+            ("group_summary", "group_profile")
+            if kind == "group"
+            else ("user_summary", "user_profile")
+        )
+        for table in tables:
+            try:
+                item = await archive.get(table, str(conversation_id))
+            except Exception:
+                continue
+            value = str(getattr(item, "value", "") or "").strip()
+            if value:
+                excerpt = value[: self._SOURCE_PROFILE_MAX_CHARS]
+                return table, excerpt + "…" if len(value) > len(excerpt) else excerpt
+        return "", ""
+
+    async def _annotated_content(
+        self, content: str, source: tuple[str, str] | None, *, relay: bool,
+    ) -> str:
+        """给跨聊天投递/回传加上来源、不可见说明与查看工具提示。"""
+        if source is None:
+            label = "未知来源聊天流"
+            profile = ""
+            profile_table = ""
+        else:
+            kind, conversation_id = source
+            label = {
+                "group": f"QQ群 {conversation_id}",
+                "private": f"QQ私聊 {conversation_id}",
+                "bilibili": f"B站 {conversation_id}",
+            }.get(kind, f"{kind} {conversation_id}")
+            if kind in ("group", "private"):
+                profile_table, profile = await self._source_profile(kind, conversation_id)
+            else:
+                profile_table, profile = "", ""
+        what = "回复" if relay else "消息"
+        profile_text = f"源聊天流档案：{profile}" if profile else "源聊天流档案：暂无"
+        lines = [
+            f"[跨聊天{'回复' if relay else '任务'}] 这是来自「{label}」的{what}（{profile_text}）。",
+            "当前聊天流的其他用户看不到这条消息：它不会发进当前聊天，只作为后台任务交给你的 agent。",
+        ]
+        if source is not None:
+            kind, conversation_id = source
+            if profile_table:
+                lines.append(
+                    f'完整源档案可以用 archive_crud__read_archive(table_name="{profile_table}", key="{conversation_id}") 分页读取全文。'
+                )
+            elif kind in ("group", "private"):
+                lines.append(
+                    f'完整源档案可以用 archive_crud__read_archive 读取（key="{conversation_id}"；群聊读 group_summary/group_profile，私聊读 user_summary/user_profile）。'
+                )
+            lines.append(
+                f'如果需要查看源聊天流的最近消息，可以调用 cross_chat_query(target_kind="{kind}", target_id="{conversation_id}")。'
+            )
+        lines.extend(["", "—— 内容 ——", content])
+        return "\n".join(lines)
     async def _deliver(
         self, kind: str, conversation_id: str, content: str, task_id: str,
         origin: tuple[str, str] | None,
@@ -370,19 +440,23 @@ class CrossChatSkill(SkillModule):
             payload["reply"] = reply
         if notification_mode == "response" and reply and origin is not None:
             payload["relayed"] = await self._publish_to_origin(
-                origin, reply, record.task_id, detail
+                origin, reply, record.task_id, detail,
+                source=("bilibili", target_id),
             )
         return _json(payload)
 
     async def _publish_to_origin(
         self, origin: tuple[str, str], reply: str, task_id: str, detail: str = "",
+        *, source: tuple[str, str] | None = None,
     ) -> bool:
         """把目标聊天的回复回传到发起方聊天（由发起方 agent 决定怎么用）。"""
         hub = self._notification_hub
         if hub is None:
             return False
         kind, conversation_id = origin
-        content = f"[跨聊天回复] {reply}" if reply else f"[跨聊天] 目标聊天未产出回复：{detail}"
+        content = await self._annotated_content(
+            reply if reply else f"目标聊天未产出回复：{detail}", source, relay=True
+        )
         try:
             await hub.publish(
                 source="cross_chat",
@@ -406,7 +480,11 @@ class CrossChatSkill(SkillModule):
         record.detail = detail
         record.status = "responded" if finished else "timeout"
         if finished:
-            await self._publish_to_origin(origin, reply, record.task_id, detail)
+            target_kind, _, target_id = record.target.partition(":")
+            await self._publish_to_origin(
+                origin, reply, record.task_id, detail,
+                source=(target_kind, target_id),
+            )
 
 
 # ── Handlers ──
@@ -433,6 +511,11 @@ async def _handle_cross_chat_send(self: CrossChatSkill, args: dict) -> str:
 
     # pipeline_key 由宿主注入（模型伪造的一律被剥离），是发起方聊天的可信身份。
     origin = _parse_pipeline_key(args.get("pipeline_key"))
+    # QQ 目标聊天由主 agent 处理：把来源聊天流、档案与「本条对当前用户不可见」
+    # 说清楚，避免目标 agent 把它当成当前聊天里某位用户说的话。B站通道不走
+    # 后台 agent，任务原文也不会直接发出，保持原文投递。
+    if target_kind != "bilibili":
+        task_text = await self._annotated_content(task_text, origin, relay=False)
     task_id = uuid.uuid4().hex[:12]
     record = _CrossChatTask(
         task_id=task_id,
@@ -498,7 +581,10 @@ async def _handle_cross_chat_send(self: CrossChatSkill, args: dict) -> str:
     if wait_detail:
         payload["detail"] = wait_detail
     if notification_mode == "response" and origin is not None:
-        relayed = await self._publish_to_origin(origin, reply, task_id, wait_detail)
+        relayed = await self._publish_to_origin(
+            origin, reply, task_id, wait_detail,
+            source=(target_kind, target_id),
+        )
         payload["relayed"] = relayed
     return _json(payload)
 
