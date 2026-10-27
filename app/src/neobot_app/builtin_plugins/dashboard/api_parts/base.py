@@ -23,6 +23,8 @@ class DashboardApiBase:
         #: pipeline_key -> 可读名称（TTL 见 DISPLAY_NAME_TTL_SECONDS）
         self._display_names: dict[str, str] = {}
         self._display_names_at = 0.0
+        #: 按插件串行校验启停状态，避免旧页面覆盖新选择。
+        self._plugin_toggle_locks: dict[str, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
     # 基础设施
