@@ -145,6 +145,11 @@ class AgentLoopMixin:
                         notification=notification_text[:200],
                     )
 
+                # 目标聊天流收到过跨聊天投递：自动把 cross_chat 工具加进本轮工具表，
+                # 让 agent 能直接查来源聊天流，而不必先 skills__load_tools。
+                if self._preactivate_cross_chat_tools(reply_toolset, queue, queue_key, event):
+                    tools = reply_toolset.executor.definitions()
+
                 # 沉默提醒:读完后台通知之后、发起模型调用之前判定。
                 # 模型长时间只调用工具、对用户一条消息都不发时注入一条 user 提醒;
                 # 提醒后刷新记录器(轮次归零、时间基准重置、阶梯阈值切到 repeat_rounds),
