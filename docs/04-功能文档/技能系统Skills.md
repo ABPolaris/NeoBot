@@ -87,9 +87,25 @@ skills__load_tools(skills=["archive_crud", "browser"])
 | `group_management` | 群管理（加群/退群/成员管理等） |
 | `friend_management` | 好友管理 |
 | `forward_message` | 消息转发 |
-| `cross_chat` | 跨会话消息传递 |
+| `cross_chat` | 跨会话消息传递（来源/档案说明 + 目标流自动加载工具） |
 | `gift` | 送礼互动 |
 | `birthday` | 生日提醒 |
+
+### 跨聊天通信（cross_chat）
+
+`cross_chat_send` 的 `task` 是「交给目标聊天主 agent 的任务」，**不会**作为消息直接发进目标聊天；
+目标管线空闲时直接启动它，正忙时由通知中枢排队注入。
+
+- **来源说明**：投递到 QQ 群/私聊的内容会带 `[跨聊天任务]` 头，写明「这是来自「QQ群 123」的消息」、
+  源聊天流档案摘要（`group_summary`/`group_profile` 或 `user_summary`/`user_profile`，最多 400 字）、
+  「当前聊天流的其他用户看不到这条消息」以及 `cross_chat_query` 的查看提示；正文在最后。
+- **结果回传**：`notification_mode=response` 时回传内容带 `[跨聊天回复]` 头，同样写明来源聊天流与档案。
+- **完整档案可读**：摘要只带 400 字；投递头里会给出具体表名与 key，目标 agent 可用
+  `archive_crud__read_archive(table_name="group_profile", key="111")` 分页读取源聊天流完整档案。
+- **工具自动加载**：聊天流收到过跨聊天投递（队列里有 `source=cross_chat` 的通知，或本轮由跨聊天投递触发）
+  时，主回复管线会自动预加载 `cross_chat` 与 `archive_crud` 工具，agent 可直接查来源聊天流、读完整档案，
+  无需先 `skills__load_tools`。
+- **B站通道例外**：B站侧没有常驻主 agent，任务由通道改写成一次 B站发言，`task` 原文不额外加 QQ 内部说明。
 
 ### 图像与创作
 | Skill | 能力 |

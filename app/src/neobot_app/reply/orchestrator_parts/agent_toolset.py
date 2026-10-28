@@ -180,7 +180,14 @@ class AgentToolsetMixin:
                                       human_request=event.human_request, allowed_tools=allowed)
                 self._agent_tool_turns[event.event_id] = (shared_tools.runtime, context, messages)
 
-        tools = reply_toolset.definitions()
+        cross_chat_loaded = self._preactivate_cross_chat_tools(
+            reply_toolset, queue, queue_key, event
+        )
+        tools = (
+            reply_toolset.executor.definitions()
+            if cross_chat_loaded
+            else reply_toolset.definitions()
+        )
         vision_context = ReplyVisionContext()
         from neobot_app.skills.image_context_skill import ImageContextSkill
 
@@ -278,7 +285,8 @@ class AgentToolsetMixin:
                 "role": "user",
                 "content": (
                     "[表情包选择] 你觉得现在发一张表情包比较合适。"
-                    "下面是候选表情包的编号和图片；可以用 send_emoji 工具选择一张发出去，"
+                    "下面是候选表情包的编号和图片；可以用 send_emoji 工具单独发送一张"
+                    "（表情包单独发，不要附带文字，也不要和要说的话一起发），"
                     "如果觉得没有合适的，就不要发表情包，继续正常回复。"
                     "候选编号：" + "、".join(str(n) for n in numbers) + "。"
                 ),
