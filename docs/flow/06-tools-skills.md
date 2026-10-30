@@ -7,13 +7,16 @@ covers:
   - app/src/neobot_app/runtime/sandbox_service.py
   - app/src/neobot_app/runtime/sandbox_maintenance.py
   - packages/chat/src/neobot_chat/skills/
-verified_against: 89ec896
-verified_hash: 3c34347e18ae
+verified_against: e0c9636
+verified_hash: 610541e355a6
 ---
 
 # 06 工具运行时与技能：注册 · native/PTC · 管理员凭据 · 沙箱裁决 · 维护 Agent
 
 ## 范围
+
+`parse_image` 图片理解工具在入口及视觉模型调用前检查当前 `pipeline_key` 对应的发言策略，
+被静默策略拒绝时不发起图片理解请求；其他工具执行流程不变，见 [14 图像解析](14-emoji-image-parse.md)。
 
 本图覆盖「模型能碰到的能力」从注册到落地的整条链路：
 

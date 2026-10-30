@@ -7,8 +7,8 @@ covers:
   - app/src/neobot_app/reply/
   - app/src/neobot_app/message/
   - packages/adapter/src/neobot_adapter/
-verified_against: 6d95ad1
-verified_hash: ffa096b19069
+verified_against: e0c9636
+verified_hash: d5a22a8bcb84
 ---
 
 # 00 全局视图：进程启动 -> 入站 -> 处理 -> 出站 -> 停机
@@ -56,12 +56,16 @@ flowchart TD
     K -- 否 --> L["意愿判定 willing + 冷却 + 概率"]
     L -- 不回复 --> M1["静默丢弃"]
     L -- 回复 --> M["回复管线 Orchestrator"]
-    M --> N["Agent 循环 provider.chat"]
+    M --> MP{"会话发言策略允许?"}
+    MP -- 否 --> M1
+    MP -- 是 --> N["Agent 循环 provider.chat"]
     N --> O{有工具调用?}
     O -- 是 --> O1["执行工具; 失败以 tool 消息回灌"]
     O1 --> N
     O -- 否 --> P["后处理 postprocess -> 发送 sender"]
-    P --> Q["自身发言入队/落盘<br/>供后续上下文重组"]
+    P --> SP{"适配器发送前再次检查策略"}
+    SP -- 允许 --> Q["自身发言入队/落盘<br/>供后续上下文重组"]
+    SP -- 拒绝 --> SB["SpeechBlocked 停止后续发送<br/>已有回执保留完成与冷却；通知不算完整投递"]
 
     N -.->|provider 异常| NX["ProviderError 上抛<br/>编排层降级, 不入历史"]
     N -.->|调用联网搜索| S1["web_search 三级回退<br/>HTTP -> 浏览器 -> DDG"]
@@ -109,6 +113,11 @@ sequenceDiagram
     end
     Note over CLI,LC: 仅应用代际切换时，控制服务与实例租约继续保留
 ```
+
+宿主的 `speaking_policy` 服务与适配器 core 共享同一注册器。插件添加的发言限制按交集判断，
+空注册器保持原行为；管理命令的临时绕过只作用于自身策略，离开作用域即撤销。
+该服务只决定是否发言，不调用睡眠唤醒或待机切换。
+一轮中已有消息送达时，后续策略拒绝仍保留回复完成终态；尚未送达时按取消收尾。
 
 ## 细节
 

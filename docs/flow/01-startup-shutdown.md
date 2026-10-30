@@ -14,8 +14,8 @@ covers:
   - app/src/neobot_app/runtime/instance_lease.py
   - app/src/neobot_app/runtime/local_control.py
   - app/src/neobot_app/runtime/connection_readiness.py
-verified_against: 6d95ad1
-verified_hash: 878228d49c1b
+verified_against: e0c9636
+verified_hash: e93671dc25c3
 ---
 
 # 01 启动装配 / 停机 / 软重启 / 待机
@@ -244,6 +244,10 @@ flowchart TD
 `process_restart`；`loguru` 走 `_run_once`（只配置一次）。
 复用清单之外的一切（队列、memory_svcs、provider、emoji、编排器、管线、应用本身）**每代重建** ——
 这就是「软重启能生效」与「面板不断线」同时成立的原因。
+
+发言策略注册器随插件主机一起复用：`build_plugin_host` 发布 `speaking_policy` 服务，
+`core_services` 将相同实例绑定到适配器 core。每代重建回复编排器时仍读取这个共享实例，
+插件配置热更新不替换注册器；策略注销由注册该策略的插件负责。
 
 热重载消费者按**注册顺序**生效（`runtime/hot_reload_registry.py:113` 注释「先注册先生效」）：
 `AdapterSupervisor` 在 :784 先注册，`_provider_reload` 在 :1182 先 unregister 再

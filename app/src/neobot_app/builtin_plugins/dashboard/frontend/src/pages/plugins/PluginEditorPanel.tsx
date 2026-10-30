@@ -12,6 +12,7 @@ import type { PluginEditorPanelProps } from './pluginProps';
 import type { PluginSurfaceContract } from '../../api/types';
 import { confirmAction } from '../../components/ui/ConfirmDialog';
 import { useAuthGate } from '../../auth/AuthContext';
+import SpeakingScheduleForm from './SpeakingScheduleForm';
 import PluginManualEntry from './PluginManualEntry';
 import { bindValues } from '../config/shared';
 import PluginSettingsViews from './PluginSettingsViews';
@@ -517,7 +518,14 @@ export default function PluginEditorPanel(props: PluginEditorPanelProps) {
                     ) : (
                       configDocument && (
                         <div className="config-body">
-                          {mode === 'form' ? (
+                          {mode === 'form' && selected.official && selected.name === 'speaking_schedule' ? (
+                            <SpeakingScheduleForm
+                              key={`${selectedId}-${editorVersion}`}
+                              value={draft}
+                              disabled={!canEdit || !!operation}
+                              onChange={onChangeField}
+                            />
+                          ) : mode === 'form' ? (
                             <SchemaForm
                               key={`${selectedId}-${editorVersion}`}
                               fields={bindValues(configDocument.schema || [], draft)}
