@@ -7,8 +7,8 @@ covers:
   - app/src/neobot_app/runtime/sandbox_service.py
   - app/src/neobot_app/runtime/sandbox_maintenance.py
   - packages/chat/src/neobot_chat/skills/
-verified_against: a1e83c0
-verified_hash: e646c1c0326a
+verified_against: 89ec896
+verified_hash: 3c34347e18ae
 ---
 
 # 06 工具运行时与技能：注册 · native/PTC · 管理员凭据 · 沙箱裁决 · 维护 Agent
@@ -28,6 +28,11 @@ verified_hash: e646c1c0326a
 不在本图内：`04-agent-loop` 画 chat 侧 `Agent` 的工具调用回合；`03-reply-pipeline` 画回复编排与
 工具表进入提示词的主干；`05-llm-routing` 画 provider 选择与降级；`01-startup` 画装配顺序。
 provider / adapter / 浏览器 / 插件只出现在调用点，不展开。
+
+插件装配在 `bootstrap/_skills.py:177` 接线：`[plugins].watch` 默认 `false`，
+仅作为 `PluginRuntime(watch=...)` 的构造参数；`load_all()` 仍在装配期同步登记插件，
+监测任务由运行时 `start_all()` 启动、`stop_all()` 等待结束。工具定义表、技能前缀、
+PTC 与权限门禁不因此改变；源码指纹与事务重载见 `08b-plugin-runtime.md`。
 
 **spec 与现实的差异（读图前先知道）**：
 

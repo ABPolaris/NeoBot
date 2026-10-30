@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { clone, longUrl } from './scenario.mjs';
 import { field, toml, parseDemoToml, describeFields, changes } from './config-schema.mjs';
 import { json } from './http.mjs';
@@ -95,7 +96,7 @@ export function createPluginPreview(scene) {
   function pluginDoc(name) {
     if (!pluginConfigs.has(name))
       pluginConfigs.set(name, {
-        revision: 1,
+        revision: randomBytes(16).toString('hex'),
         config: { enabled: true, greeting: '你好，欢迎使用演示面板。', max_items: 20, notify_admin: false },
       });
     const doc = pluginConfigs.get(name);
@@ -209,7 +210,7 @@ export function createPluginPreview(scene) {
           const doc = pluginDoc(name);
           if (body.revision !== doc.revision) return json(res, { error: '演示插件配置版本已变化' }, 409);
           pluginConfigs.set(name, {
-            revision: doc.revision + 1,
+            revision: randomBytes(16).toString('hex'),
             config: body.mode === 'toml' ? parseDemoToml(body.source) : clone(body.config || {}),
           });
           return json(res, { ...pluginDoc(name), message: '插件配置已保存到演示内存', changes });

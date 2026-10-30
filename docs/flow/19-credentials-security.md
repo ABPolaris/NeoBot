@@ -4,8 +4,8 @@ covers:
   - app/src/neobot_app/credentials/
   - app/src/neobot_app/panel_auth.py
   - app/src/neobot_app/panel_web.py
-verified_against: 104fe25
-verified_hash: f48198f898ba
+verified_against: fb703fe5
+verified_hash: 90a9f55353ec
 ---
 
 # 19 凭据、面板鉴权与安全边界
@@ -159,8 +159,11 @@ flowchart LR
 ```
 
 两者**不通兑**：拿到面板登录态不等于能在群里执行危险动作；反之亦然。
-`panel_web.py` 只负责静态资源/Web 扩展的鉴权判定（哪些路径公开、哪些需要登录），
+`panel_web.py` 负责静态资源/Web 扩展的鉴权与请求权限判定（公开路径、会话、read/operate/manage），
 真正的中间件在 `server.py:448`（见 `09-dashboard.md`）。
+
+受保护扩展在未初始化密码时也拒绝数据请求。默认写操作需要 manage；普通已登录玩家的业务操作必须显式标为 operate，
+例如星舰的成绩/成就写入，重置及未知写操作保留 manage。声明非法时拒绝，不能自动降级成普通操作。
 
 面板内改密由 `api_parts/auth.py::AuthMixin.auth_password` 执行管理权限与 CSRF 校验；
 `PanelPasswordStore.change_password` 在锁内核对会话 revision 和旧密码，写盘成功后才更新内存。
