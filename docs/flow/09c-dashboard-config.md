@@ -11,8 +11,8 @@ covers:
   - app/src/neobot_app/config/chat_writer.py
   - app/src/neobot_app/config/hot_reload.py
   - app/src/neobot_app/config/loader/backup.py
-verified_against: 235e60ac
-verified_hash: 76c34945a78c
+verified_against: 8320053
+verified_hash: f918ad30c97f
 ---
 
 # 09c 面板配置编辑：三条写入通道 · diff 与掩码 · 前端编辑器数据流
@@ -31,6 +31,8 @@ verified_hash: 76c34945a78c
 * 前端编辑器数据流：`pages/ConfigManager.tsx`（顶层 tab）、`pages/config/BotConfigPanel.tsx`
   （表单与 TOML 双模式）、`pages/Plugins.tsx` + `pages/plugins/PluginEditorPanel.tsx`、
   `components/SchemaForm.tsx` 与 `components/schema/*`、`api/client.ts` 的状态码语义。
+
+原文模型校验使用保留 date/time/datetime 类型的打包默认值；不能先将默认值 JSON 化，否则严格模型会误拒绝合法 TOML。
 
 统一页面桥接复用插件配置读写，不另存一份配置。文件 revision 是不透明 SHA 字符串，新文件为空串；保存冲突仍返回 409，页面保留草稿。读取、默认值、字段描述与源码保护共同消费模型的显式敏感语义及认证键名，停用插件只读静态契约。保存先恢复占位符，再校验并回填实际类型；SecretStr/SecretBytes 保存真实文本，配置校验错误不回显作者异常正文。
 
@@ -153,8 +155,8 @@ sequenceDiagram
     end
     Note over UI,CM: 插件配置是另一条通道：先写 .dashboard.bak，再就地合并写回
     UI->>API: POST /api/plugins/{name}/config revision + config 或 source
-    API->>CM: 表单模式先过 pydantic model_validate，再按 model_dump 回填类型（TOML 模式不校验模型）
-    CM->>FS: 就地更新：缺键不删、表改标量静默忽略
+    API->>CM: 表单先校验/回填类型；原文先核对 revision，再按原生默认值合并并校验模型
+    CM->>FS: 校验通过才备份并原子写盘；原文保留注释/格式
     opt reload 且插件登记了 consumer
         API->>PCR: apply_plugin_config_change(before, after)
         PCR->>PL: apply_config 抛异常则保留旧配置并原样回错
@@ -610,9 +612,9 @@ flowchart TD
    「避免把管理员锁在门外」的假设不成立。
 6. **插件页 20 秒轮询会丢未保存草稿**：列表轮询换新 `items` 数组，依赖 `items` 的
    effect 重跑，清空 `configDocument` 并重新读取。其它路径都有 `dirty` 守卫，唯独这条没有。
-7. **插件配置的 TOML 模式不做模型校验**：`plugin_config_save` 只在表单模式跑
-   `model.model_validate`（`api.py:1263`）；TOML 模式只解析语法，写进去的非法值
-   要等插件加载时才发现，表现为 `config_error` 与「回落到默认值运行」。
+7. **原文保存不能依赖加载失败兜底**：`PluginConfigEditor.save` 在写盘前验证模型，
+   非法值返回 400 并保持文件、备份、revision 与运行配置。停用/未加载而无法确认模型时，
+   原文只读并提示原因，不为校验执行插件入口；已确认无模型的配置保留 TOML 语法支持。
 8. **插件配置「表改标量」被静默忽略**：`PluginConfigEditor._merge_into_document` 遇到
    「现有值是子表、提交值是标量」时 `continue`（`plugin_config.py:413`），不报错也不写入。
 9. **插件配置的改动明细前端看不到**：保存响应里有 `changes`（`api.py:1304`），

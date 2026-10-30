@@ -94,6 +94,52 @@ beforeEach(() => {
 });
 
 describe('Plugins 页面', () => {
+  it('配置模型不可用时禁用 TOML 并展示原因，保留表单编辑', async () => {
+    const reason = '插件配置模型尚不可用，无法校验 TOML 原文；请先启用并加载插件，或使用表单模式';
+    vi.mocked(api.pluginConfig).mockResolvedValue({
+      ok: true,
+      status: 200,
+      error: null,
+      data: {
+        config: { interval: 10 },
+        form_supported: true,
+        source_available: false,
+        source_disabled_reason: reason,
+        source: '',
+        schema: [{ name: 'interval', path: ['interval'], kind: 'scalar', type: 'int', value: 10 }],
+      },
+    });
+    render(<Plugins />);
+    expect(await screen.findByText(reason)).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'TOML' })).toBeDisabled();
+    expect(screen.getByRole('tab', { name: 'TOML' })).toHaveAttribute('title', reason);
+    expect(screen.getByDisplayValue('10')).toBeEnabled();
+  });
+
+  it('配置模型不可用且没有表单时，TOML 编辑器保持只读并禁止保存', async () => {
+    vi.mocked(api.pluginConfig).mockResolvedValue({
+      ok: true,
+      status: 200,
+      error: null,
+      data: {
+        config: {},
+        form_supported: false,
+        source_available: false,
+        source_disabled_reason: '请先启用并加载插件',
+        source: '',
+        schema: [],
+      },
+    });
+    render(<Plugins />);
+    const editor = await screen.findByLabelText('TOML 配置');
+    expect(editor).toHaveAttribute('readonly');
+    fireEvent.change(editor, { target: { value: 'unsafe = true' } });
+    fireEvent.keyDown(editor, { key: 's', ctrlKey: true });
+    expect(editor).toHaveValue('');
+    expect(screen.getByRole('button', { name: /保存并重载/ })).toBeDisabled();
+    expect(api.pluginConfigSave).not.toHaveBeenCalled();
+  });
+
   it('官方发言时段保存数组、保留精确分钟及冲突草稿，并沿用撤销与 TOML 路径', async () => {
     const schedule = {
       ...PLUGIN_LIST.items[0],

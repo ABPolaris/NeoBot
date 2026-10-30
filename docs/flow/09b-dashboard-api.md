@@ -11,8 +11,8 @@ covers:
   - app/src/neobot_app/builtin_plugins/dashboard/api_parts/config.py
   - app/src/neobot_app/builtin_plugins/dashboard/api_parts/plugins.py
   - app/src/neobot_app/builtin_plugins/dashboard/api_parts/_common.py
-verified_against: 93d0141
-verified_hash: cbed7aa8b3f1
+verified_against: 8320053
+verified_hash: 399dcb9eaa2c
 ---
 
 # 09b 面板接口面：api.py 的端点分组 · 权限级别 · 错误码语义
@@ -286,7 +286,7 @@ flowchart TD
     B -- "ValueError" --> B2["_error_middleware 兜成 400｜server.py:441"]
     B -- "其它 Exception" --> B3["logger.exception 加 500 服务器处理请求失败"]
     B -- 否 --> C{"显式 _json_error 的 status"}
-    C -- 400 --> C1["参数缺失或非法 pydantic 校验 密码策略 请求体不是 JSON 对象"]
+    C -- 400 --> C1["参数/pydantic校验失败、原文无法安全验证<br/>字段错误仅含脱敏位置，不回显校验器输入"]
     C -- 401 --> C2["只有 auth_login 密码不正确｜api.py:292<br/>其余 401 全部来自中间件"]
     C -- 403 --> C3["_require_manage 两条 setup 非本机 未配置密码 删除未开启 CSRF"]
     C -- 404 --> C4["插件 档案 快照 聊天流 模型条目 压缩任务 不存在"]

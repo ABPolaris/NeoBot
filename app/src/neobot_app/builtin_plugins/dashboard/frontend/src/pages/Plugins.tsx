@@ -481,7 +481,12 @@ export default function Plugins() {
   }
 
   const isConsole = selected?.name === consolePlugin;
-  const canEdit = selectedExists && permissions.manage_enabled && !!configDocument && !loading;
+  const canEdit =
+    selectedExists &&
+    permissions.manage_enabled &&
+    !!configDocument &&
+    !loading &&
+    (mode !== 'toml' || configDocument.source_available !== false);
   const invalidSchedule =
     mode === 'form' &&
     selected?.official &&

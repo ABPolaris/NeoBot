@@ -14,7 +14,7 @@ from ..config_manager import (
     EnvFileManager,
     describe_pydantic_model,
 )
-from ..plugin_config import PluginConfigConflictError, PluginConfigError
+from ..plugin_config import PluginConfigConflictError, PluginConfigError, PluginConfigValidationError
 from ..config_parts.normalize import normalize_config_values
 from ._common import _pydantic_errors, _append_model_reload_hint, _json_ok, _json_error
 
@@ -97,6 +97,12 @@ class ConfigMixin:
             )
         except PluginConfigConflictError as exc:
             return _json_error(str(exc), status=409)
+        except PluginConfigValidationError as exc:
+            return _json_error(
+                str(exc),
+                status=400,
+                errors=_pydantic_errors(exc.validation_error, include_messages=False, model=model),
+            )
         except PluginConfigError as exc:
             return _json_error(str(exc), status=400)
         schema = describe_pydantic_model(model, document.get("config") or {})

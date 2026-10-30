@@ -109,6 +109,7 @@ export interface ConfigDocument {
   revision?: string;
   form_supported?: boolean;
   source_available?: boolean;
+  source_disabled_reason?: string;
   source?: string;
   config?: Record<string, unknown>;
   schema?: FieldDescriptor[];

@@ -52,6 +52,7 @@ class PluginsMixin:
         # 字段说明来自插件自带 plugin.toml 的 [config] 注释（生成的配置也带注释）
         model = control.config_model(name)
         schema = None
+        source_disabled_reason = ""
         getter = getattr(control, "surface", None)
         if model is None and callable(getter):
             # 停用插件只读静态契约，仍须保护显式敏感字段，不能为读取配置导入插件。
@@ -62,12 +63,17 @@ class PluginsMixin:
 
                 raise PluginConfigError("插件配置契约无效，请先检查插件工程") from exc
             schema = contract.get("config") if contract else None
+            # JSON Schema 无法执行插件作者的跨字段校验器。只有运行中或静态
+            # 契约明确声明 config=null，才能确认无模型并沿用纯 TOML 编辑。
+            if not isinstance(contract, dict) or "config" not in contract or schema is not None:
+                source_disabled_reason = "插件配置模型尚不可用，无法校验 TOML 原文；请先启用并加载插件，或使用表单模式"
         return PluginConfigEditor(
             path,
             defaults=defaults,
             comments=self._plugin_field_comments(control, name),
             model=model,
             schema=schema,
+            source_disabled_reason=source_disabled_reason,
         )
 
     def _plugin_field_comments(self, control: Any, name: str) -> dict[str, str]:

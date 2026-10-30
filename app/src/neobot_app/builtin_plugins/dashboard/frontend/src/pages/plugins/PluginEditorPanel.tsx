@@ -263,6 +263,7 @@ export default function PluginEditorPanel(props: PluginEditorPanelProps) {
                   aria-selected={!pluginPage && mode === 'toml'}
                   className={!pluginPage && mode === 'toml' ? 'active' : ''}
                   disabled={!permissions.manage_enabled || !configDocument?.source_available || !!operation}
+                  title={configDocument?.source_disabled_reason || undefined}
                   onClick={() => {
                     setPagePlugin('');
                     onModeChange('toml');
@@ -518,6 +519,11 @@ export default function PluginEditorPanel(props: PluginEditorPanelProps) {
                     ) : (
                       configDocument && (
                         <div className="config-body">
+                          {configDocument.source_disabled_reason && (
+                            <p className="muted small" role="note">
+                              {configDocument.source_disabled_reason}
+                            </p>
+                          )}
                           {mode === 'form' && selected.official && selected.name === 'speaking_schedule' ? (
                             <SpeakingScheduleForm
                               key={`${selectedId}-${editorVersion}`}

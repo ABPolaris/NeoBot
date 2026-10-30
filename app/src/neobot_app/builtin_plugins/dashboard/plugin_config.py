@@ -25,6 +25,7 @@ import hashlib
 import os
 import tempfile
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,12 @@ class PluginConfigError(RuntimeError):
 
 class PluginConfigConflictError(PluginConfigError):
     pass
+
+
+class PluginConfigValidationError(PluginConfigError):
+    def __init__(self, validation_error: Exception) -> None:
+        super().__init__("插件配置校验失败")
+        self.validation_error = validation_error
 
 
 #: 从 plugin.toml 提取字段说明时使用的表名
@@ -72,7 +79,7 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def _jsonable(value: Any) -> Any:
+def _jsonable(value: Any, *, for_toml: bool = False) -> Any:
     if isinstance(value, SecretStr):
         return value.get_secret_value()
     if isinstance(value, SecretBytes):
@@ -81,9 +88,11 @@ def _jsonable(value: Any) -> Any:
         except UnicodeDecodeError:
             raise PluginConfigError("凭据不是有效的 UTF-8 文本，无法保存为 TOML") from None
     if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
+        return {str(key): _jsonable(item, for_toml=for_toml) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
+        return [_jsonable(item, for_toml=for_toml) for item in value]
+    if for_toml and isinstance(value, (datetime, date, time)):
+        return value
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
@@ -294,11 +303,15 @@ class PluginConfigEditor:
         comments: Mapping[str, str] | None = None,
         model: Any = None,
         schema: dict[str, Any] | None = None,
+        source_disabled_reason: str = "",
     ) -> None:
         self.path = Path(path)
-        self._defaults = _jsonable({str(key): value for key, value in (defaults or {}).items()})
+        self._validation_defaults = {str(key): value for key, value in (defaults or {}).items()}
+        self._defaults = _jsonable(self._validation_defaults)
         self._comments = {str(key): str(value) for key, value in (comments or {}).items()}
+        self._model = model
         self._secrets = PluginSecretPolicy(model, schema=schema)
+        self._source_disabled_reason = source_disabled_reason
 
     @property
     def exists(self) -> bool:
@@ -315,7 +328,7 @@ class PluginConfigEditor:
         """当前文档；文件不存在时用插件默认值渲染出一份可编辑的骨架（带注释）。"""
         if not self.path.is_file():
             document = tomlkit.document()
-            for key, value in self._defaults.items():
+            for key, value in _jsonable(self._validation_defaults, for_toml=True).items():
                 _add_with_comment(document, key, value, self._comment_for(key))
             return document
         try:
@@ -346,6 +359,11 @@ class PluginConfigEditor:
         # 插件实际生效的配置 = 打包默认值 + 插件数据目录里保存的值
         effective = merge_plugin_config(self._defaults, self._stored())
         secret_present = self._secrets.contains(effective)
+        source_disabled_reason = (
+            "该插件配置含密钥，已禁用源码编辑；请使用表单模式（密钥只能更新，不能读取）"
+            if secret_present
+            else self._source_disabled_reason
+        )
         masked = self._secrets.mask(effective)
         # schema 从打码后的数据构建，避免分组 value 里残留明文
         schema = _decorate_schema(describe_mapping(masked), effective, self._secrets)
@@ -361,8 +379,9 @@ class PluginConfigEditor:
             "exists": self.path.is_file(),
             "revision": self.revision(),
             # 含密钥时不返回源码，避免绕过脱敏拿到明文
-            "source": "" if secret_present else tomlkit.dumps(document),
-            "source_available": not secret_present,
+            "source": "" if source_disabled_reason else tomlkit.dumps(document),
+            "source_available": not source_disabled_reason,
+            "source_disabled_reason": source_disabled_reason,
             "secret_policy": "write_only",
             "config": masked,
             "schema": schema,
@@ -391,10 +410,20 @@ class PluginConfigEditor:
             # 读取与保存必须使用同一套生效配置，首次保存前的打包密钥也不能绕过保护。
             if self._secrets.contains(merge_plugin_config(self._defaults, original)):
                 raise PluginConfigError("该插件配置含密钥，已禁用源码编辑；请使用表单模式（密钥只能更新，不能读取）")
+            if self._source_disabled_reason:
+                raise PluginConfigError(self._source_disabled_reason)
             try:
                 document = tomlkit.parse(source)
             except Exception as exc:
                 raise PluginConfigError(f"TOML 解析失败: {exc}") from exc
+            if self._model is not None:
+                # 原文替换整份文件，不能带入旧文件里已删除的字段；与运行时一样
+                # 合并打包默认值后校验。校验结果不重建文档，保留原文注释与格式。
+                effective = merge_plugin_config(self._validation_defaults, dict(document.unwrap()))
+                try:
+                    self._model.model_validate(effective)
+                except Exception as exc:
+                    raise PluginConfigValidationError(exc) from exc
         else:
             # 占位符/空值 -> 沿用原密钥；新值 -> 覆盖（密钥只能更新，不能读取）
             submitted = self.prepare_values(dict(config or {}))
@@ -442,6 +471,7 @@ __all__ = [
     "PluginConfigConflictError",
     "PluginConfigEditor",
     "PluginConfigError",
+    "PluginConfigValidationError",
     "apply_field_descriptions",
     "describe_mapping",
     "read_manifest_comments",

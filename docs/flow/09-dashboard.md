@@ -4,8 +4,8 @@ covers:
   - app/src/neobot_app/builtin_plugins/dashboard/
   - app/src/neobot_app/panel_auth.py
   - app/src/neobot_app/panel_web.py
-verified_against: 235e60ac
-verified_hash: 1bb09f2dedf5
+verified_against: 8320053
+verified_hash: 2f052acbd788
 ---
 
 # 09 网页面板：HTTP 路由 · 鉴权 · 静态产物 · 前端数据流
@@ -480,7 +480,8 @@ flowchart TD
 `data/plugin_state.json` 里 dashboard 的 `enabled=false` 再重启 NeoBot。
 
 配置改动改走「原地生效」通道：`load()` 里 `register_config_consumer`（`__init__.py:184`）登记消费者，
-保存配置且带 `reload=true` 时由 `plugin_config_save`（`api.py:1242`）调用
+插件配置原文保存先检查 revision 与模型可验证状态，校验失败不写盘、不触发生效或重载。
+保存配置且带 `reload=true` 时由 `app/src/neobot_app/builtin_plugins/dashboard/api_parts/config.py` 的 `plugin_config_save` 调用
 `_apply_plugin_config_in_place`（`api.py:1347`）：运行期安全项立刻生效，需重启项只回提示。
 `apply_runtime_config` 只刷新 `runtime_config`、日志缓冲容量与历史保留天数，**不碰**监听、会话与安全字段。
 失败时抛出，调用方保留旧配置并把错误原样报给面板（`hot_reload.py:114`）。
